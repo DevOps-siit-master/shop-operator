@@ -1,11 +1,32 @@
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  labels:
-    app.kubernetes.io/name: shop-operator
-    app.kubernetes.io/managed-by: kustomize
   name: manager-role
 rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - shophub.devops-siit.io
+  resources:
+  - wallets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - shophub.devops-siit.io
+  resources:
+  - wallets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - shophub.devops-siit.io
+  resources:
+  - wallets/status
+  verbs:
+  - get
+  - patch
+  - update
