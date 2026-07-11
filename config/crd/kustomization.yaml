@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/shophub.devops-siit.io_wallets.yaml
+- bases/shophub.devops-siit.io_discordchannels.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
