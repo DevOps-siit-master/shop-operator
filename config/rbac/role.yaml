@@ -7,6 +7,8 @@ rules:
 - apiGroups:
   - shophub.devops-siit.io
   resources:
+  - discordchannels
+  - shops
   - wallets
   verbs:
   - create
@@ -19,12 +21,16 @@ rules:
 - apiGroups:
   - shophub.devops-siit.io
   resources:
+  - discordchannels/finalizers
+  - shops/finalizers
   - wallets/finalizers
   verbs:
   - update
 - apiGroups:
   - shophub.devops-siit.io
   resources:
+  - discordchannels/status
+  - shops/status
   - wallets/status
   verbs:
   - get
