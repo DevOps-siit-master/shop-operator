@@ -31,9 +31,7 @@ type WalletSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// foo is an example field of Wallet. Edit wallet_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+	ShopRef string `json:"shopRef,omitempty"`
 }
 
 // WalletStatus defines the observed state of Wallet.
@@ -57,10 +55,18 @@ type WalletStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// +optional
+	Address string `json:"address,omitempty"`
+
+	// +optional
+	Ready bool `json:"ready,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Address",type="string",JSONPath=".status.address"
+// +kubebuilder:printcolumn:name="Ready",type="boolean",JSONPath=".status.ready"
 
 // Wallet is the Schema for the wallets API
 type Wallet struct {
