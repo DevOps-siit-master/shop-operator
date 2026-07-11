@@ -2,4 +2,5 @@
 resources:
 - shophub_v1_wallet.yaml
 - shophub_v1_discordchannel.yaml
+- shophub_v1_shop.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

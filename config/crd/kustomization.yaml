@@ -4,6 +4,7 @@
 resources:
 - bases/shophub.devops-siit.io_wallets.yaml
 - bases/shophub.devops-siit.io_discordchannels.yaml
+- bases/shophub.devops-siit.io_shops.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
