@@ -18,3 +18,17 @@ resources:
 - metrics_auth_role.yaml
 - metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
+# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
+# default, aiding admins in cluster management. Those roles are
+# not used by the shop-operator itself. You can comment the following lines
+# if you do not want those helpers be installed with your Project.
+- shop_admin_role.yaml
+- shop_editor_role.yaml
+- shop_viewer_role.yaml
+- discordchannel_admin_role.yaml
+- discordchannel_editor_role.yaml
+- discordchannel_viewer_role.yaml
+- wallet_admin_role.yaml
+- wallet_editor_role.yaml
+- wallet_viewer_role.yaml
+
