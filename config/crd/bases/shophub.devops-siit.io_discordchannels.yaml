@@ -125,6 +125,8 @@ spec:
                 x-kubernetes-list-type: map
               ready:
                 type: boolean
+              webhookID:
+                type: string
             type: object
         required:
         - spec

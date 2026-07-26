@@ -65,6 +65,9 @@ type DiscordChannelStatus struct {
 
 	// +optional
 	ChannelID string `json:"channelID,omitempty"`
+
+	// +optional
+	WebhookID string `json:"webhookID,omitempty"`
 }
 
 // +kubebuilder:object:root=true
