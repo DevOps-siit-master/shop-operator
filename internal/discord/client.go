@@ -31,6 +31,7 @@ type createWebhookResponse struct {
 
 type Client interface {
 	CreateChannel(ctx context.Context, token, serverID, name string) (string, error)
+	DeleteChannel(ctx context.Context, token, channelID string) error
 	CreateWebhook(ctx context.Context, token, channelID, name string) (id, webhookToken string, err error)
 	TransformIntoUrl(id, token string) (url string)
 }
@@ -130,4 +131,33 @@ func (client *ApiClient) TransformIntoUrl(id, token string) (url string) {
 
 func New(discordApiUrl string) Client {
 	return &ApiClient{BaseURL: discordApiUrl, HTTPClient: &http.Client{Timeout: 30 * time.Second}}
+}
+
+func (client *ApiClient) DeleteChannel(ctx context.Context, token, channelID string) error {
+	url := fmt.Sprintf("%s/channels/%s", client.BaseURL, channelID)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to build request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", "Bot "+token)
+
+	resp, err := client.HTTPClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to delete discord channel: %w", err)
+	}
+
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response discord API: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("discord API returned status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	return nil
 }

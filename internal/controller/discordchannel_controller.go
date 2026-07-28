@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	shophubv1 "github.com/DevOps-siit-master/shop-operator/api/v1"
@@ -43,6 +44,8 @@ type DiscordChannelReconciler struct {
 	DiscordSecretNamespace string
 	DiscordAPIClient       discord.Client
 }
+
+const discordChannelFinalizer = "shophub.devops-siit.io/discordchannel-finalizer"
 
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=discordchannels,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=discordchannels/status,verbs=get;update;patch
@@ -110,12 +113,37 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	}
 
+	if !discordChannel.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&discordChannel, discordChannelFinalizer) {
+			if discordChannel.Status.ChannelID != "" {
+				if err := r.DiscordAPIClient.DeleteChannel(ctx, string(token), discordChannel.Status.ChannelID); err != nil {
+					log.Error(err, "failed to delete discord channel during cleanup")
+					return ctrl.Result{}, err
+				}
+			}
+
+			controllerutil.RemoveFinalizer(&discordChannel, discordChannelFinalizer)
+			if err := r.Update(ctx, &discordChannel); err != nil {
+				log.Error(err, "failed to remove finalizer")
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(&discordChannel, discordChannelFinalizer) {
+		controllerutil.AddFinalizer(&discordChannel, discordChannelFinalizer)
+		if err := r.Update(ctx, &discordChannel); err != nil {
+			log.Error(err, "failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+	}
+
 	if discordChannel.Status.WebhookID != "" {
 		return ctrl.Result{}, nil
 	}
 
 	if discordChannel.Status.ChannelID == "" {
-		// Create a channel first and get ChannelID
 		channelId, err := r.DiscordAPIClient.CreateChannel(ctx, string(token), discordChannel.Spec.ServerID, discordChannel.Spec.ChannelName)
 		if err != nil {
 			log.Error(err, "failed to create discord channel")
@@ -141,7 +169,6 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	if discordChannel.Status.WebhookID == "" {
 		// TODO: santize the name, create something for discord channel name see how to save secret
-		// Create webhook for Channel which will be later used to publish messages
 		webhookId, webhookToken, err := r.DiscordAPIClient.CreateWebhook(ctx, string(token), discordChannel.Status.ChannelID, discordChannel.Spec.ChannelName)
 		if err != nil {
 			log.Error(err, "failed to create discord webhook")
@@ -157,7 +184,6 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 
-		// TODO: save webhook url inside secrets
 		webhookSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      discordChannel.Name + "-webhook",
