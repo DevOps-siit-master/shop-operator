@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -53,12 +55,16 @@ const (
 	defaultShopAppImage = "shophub/shop-app:latest"
 	defaultShopAppPort  = 8080
 
+	// defaultRedisImage is the Redis image used for the light (Redis) tier via the
+	// OT-Container-Kit operator, overridable with REDIS_IMAGE.
+	defaultRedisImage = "quay.io/opstree/redis:v7.0.15"
+
 	// Condition type surfaced on Shop.status.conditions.
 	conditionAvailable = "Available"
 
 	// databaseReadyRequeue is how long we wait before re-checking when the
-	// database's operator (CNPG / Redis Enterprise) is not installed in the
-	// cluster yet, so we don't hot-loop.
+	// database's operator (CNPG / Redis) is not installed in the cluster yet, or
+	// its database is still provisioning, so we don't hot-loop.
 	databaseReadyRequeue = 30 * time.Second
 	// deploymentPendingRequeue is a shorter poll used to refresh status while the
 	// app Deployment is still rolling out.
@@ -76,7 +82,7 @@ const (
 	// the DB custom resource could not be created at all.
 	dbStateOperatorMissing databaseState = iota
 	// dbStateProvisioning: the DB custom resource exists but is not yet active
-	// (e.g. a REDB with no bound REC, or a CNPG Cluster still bootstrapping).
+	// (e.g. a Redis StatefulSet still starting, or a CNPG Cluster bootstrapping).
 	dbStateProvisioning
 	// dbStateReady: the database reports itself active and usable.
 	dbStateReady
@@ -92,12 +98,14 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=shops/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=shops/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=app.redislabs.com,resources=redisenterprisedatabases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=redis.redis.opstreelabs.in,resources=redis,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives a Shop CR towards its desired state: a database (via the
-// CNPG or Redis Enterprise operator), a Deployment of the Shop app scaled to the
+// CNPG or OSS Redis operator), a Deployment of the Shop app scaled to the
 // requested availability tier, and a Service in front of it. Owned child objects
 // are garbage-collected automatically when the Shop is deleted (via owner
 // references), so no finalizer is needed.
@@ -252,27 +260,41 @@ func (r *ShopReconciler) reconcilePostgres(
 	return env, databaseStateFrom(exists, cluster, cnpgClusterReady), nil
 }
 
-// reconcileRedis ensures a Redis Enterprise database (REDB) exists for the Shop
-// and wires the app to the secret the REDB controller generates.
+// reconcileRedis ensures an open-source Redis (OT-Container-Kit operator) exists
+// for the Shop. Unlike a managed DB, the OSS operator does not mint credentials,
+// so we generate a password Secret ourselves, reference it from the Redis CR, and
+// wire the app to the operator-created "<name>" Service on port 6379.
 func (r *ShopReconciler) reconcileRedis(
 	ctx context.Context, shop *shophubv1.Shop,
 ) ([]corev1.EnvVar, databaseState, error) {
-	redbName := resourceName(shop) + "-redis"
-	// The Redis Enterprise operator publishes credentials in redb-<name>.
-	redbSecret := "redb-" + redbName
+	redisName := resourceName(shop) + "-redis"
+	authSecret := redisName + "-auth"
 
-	redb := &unstructured.Unstructured{}
-	redb.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "app.redislabs.com",
-		Version: "v1alpha1",
-		Kind:    "RedisEnterpriseDatabase",
+	// 1. Ensure a password Secret exists (generated once; never rotated here).
+	if err := r.ensureRedisAuthSecret(ctx, shop, authSecret); err != nil {
+		return nil, dbStateProvisioning, err
+	}
+
+	// 2. Ensure the Redis CR exists, protected by that Secret.
+	redis := &unstructured.Unstructured{}
+	redis.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "redis.redis.opstreelabs.in",
+		Version: "v1beta2",
+		Kind:    "Redis",
 	})
-	redb.SetName(redbName)
-	redb.SetNamespace(shop.Namespace)
+	redis.SetName(redisName)
+	redis.SetNamespace(shop.Namespace)
 
-	exists, err := r.createOrIgnoreMissingCRD(ctx, shop, redb, func() error {
-		return unstructured.SetNestedField(redb.Object, map[string]any{
-			"memorySize": "100MB",
+	exists, err := r.createOrIgnoreMissingCRD(ctx, shop, redis, func() error {
+		return unstructured.SetNestedField(redis.Object, map[string]any{
+			"kubernetesConfig": map[string]any{
+				"image":           redisImage(),
+				"imagePullPolicy": "IfNotPresent",
+				"redisSecret": map[string]any{
+					"name": authSecret,
+					"key":  "password",
+				},
+			},
 		}, "spec")
 	})
 	if err != nil {
@@ -280,11 +302,68 @@ func (r *ShopReconciler) reconcileRedis(
 	}
 
 	env := []corev1.EnvVar{
-		{Name: "REDIS_HOST", Value: redbName},
-		{Name: "REDIS_PORT", ValueFrom: secretKeyRef(redbSecret, "port")},
-		{Name: "REDIS_PASSWORD", ValueFrom: secretKeyRef(redbSecret, "password")},
+		{Name: "REDIS_HOST", Value: redisName},
+		{Name: "REDIS_PORT", Value: "6379"},
+		{Name: "REDIS_PASSWORD", ValueFrom: secretKeyRef(authSecret, "password")},
 	}
-	return env, databaseStateFrom(exists, redb, redbActive), nil
+	if !exists {
+		return env, dbStateOperatorMissing, nil
+	}
+
+	// The Redis CR exposes no usable status, so readiness is taken from the
+	// StatefulSet the operator creates (same name as the CR).
+	ready, err := r.statefulSetReady(ctx, shop.Namespace, redisName)
+	if err != nil {
+		return nil, dbStateProvisioning, err
+	}
+	if ready {
+		return env, dbStateReady, nil
+	}
+	return env, dbStateProvisioning, nil
+}
+
+// ensureRedisAuthSecret creates a Shop-owned Secret holding a generated Redis
+// password if one does not already exist. It never overwrites an existing secret,
+// so the password stays stable across reconciles.
+func (r *ShopReconciler) ensureRedisAuthSecret(
+	ctx context.Context, shop *shophubv1.Shop, name string,
+) error {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: shop.Namespace},
+	}
+	err := r.Get(ctx, client.ObjectKeyFromObject(secret), secret)
+	if err == nil {
+		return nil // already exists; keep the current password
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	password, err := randomPassword()
+	if err != nil {
+		return err
+	}
+	secret.StringData = map[string]string{"password": password}
+	if err := controllerutil.SetControllerReference(shop, secret, r.Scheme); err != nil {
+		return err
+	}
+	return r.Create(ctx, secret)
+}
+
+// statefulSetReady reports whether the named StatefulSet has at least one ready
+// replica. A missing StatefulSet is treated as not-ready (not an error).
+func (r *ShopReconciler) statefulSetReady(
+	ctx context.Context, namespace, name string,
+) (bool, error) {
+	var sts appsv1.StatefulSet
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &sts)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sts.Status.ReadyReplicas >= 1, nil
 }
 
 // databaseStateFrom derives the DB state from whether the CR exists and, when it
@@ -309,11 +388,21 @@ func cnpgClusterReady(obj *unstructured.Unstructured) bool {
 	return err == nil && found && ready >= 1
 }
 
-// redbActive reports whether a Redis Enterprise database has reached "active"
-// (status.status == "active").
-func redbActive(obj *unstructured.Unstructured) bool {
-	status, found, err := unstructured.NestedString(obj.Object, "status", "status")
-	return err == nil && found && status == "active"
+// randomPassword returns a URL-safe 32-char random secret.
+func randomPassword() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// redisImage returns the Redis image for the light tier, overridable via REDIS_IMAGE.
+func redisImage() string {
+	if img := os.Getenv("REDIS_IMAGE"); img != "" {
+		return img
+	}
+	return defaultRedisImage
 }
 
 // createOrIgnoreMissingCRD creates obj (owned by shop) if absent. It returns
@@ -467,11 +556,11 @@ func (r *ShopReconciler) updateStatus(
 	case dbState == dbStateOperatorMissing:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "DatabaseOperatorMissing"
-		cond.Message = "The database operator (CNPG/REDB) is not installed in the cluster"
+		cond.Message = "The database operator (CNPG for standard, Redis for light) is not installed in the cluster"
 	case dbState == dbStateProvisioning:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "DatabaseProvisioning"
-		cond.Message = "Waiting for the database to become active (check the DB resource, e.g. a REDB with no bound REC)"
+		cond.Message = "Waiting for the database to become ready"
 	default:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "DeploymentProgressing"
