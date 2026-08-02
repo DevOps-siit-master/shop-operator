@@ -37,6 +37,7 @@ import (
 
 	shophubv1 "github.com/DevOps-siit-master/shop-operator/api/v1"
 	"github.com/DevOps-siit-master/shop-operator/internal/controller"
+	"github.com/DevOps-siit-master/shop-operator/internal/discord"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -84,6 +85,21 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	discordSecretName := os.Getenv("DISCORD_SECRET_NAME")
+	if discordSecretName == "" {
+		discordSecretName = "discord-bot-credentials"
+	}
+
+	discordSecretNamespace := os.Getenv("DISCORD_SECRET_NAMESPACE")
+	if discordSecretNamespace == "" {
+		discordSecretNamespace = "shop-operator-system"
+	}
+
+	discordApiUrl := os.Getenv("DISCORD_API_URL")
+	if discordApiUrl == "" {
+		discordApiUrl = "https://discord.com/api/v10"
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -186,8 +202,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.DiscordChannelReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                 mgr.GetClient(),
+		Scheme:                 mgr.GetScheme(),
+		DiscordSecretName:      discordSecretName,
+		DiscordSecretNamespace: discordSecretNamespace,
+		DiscordAPIClient:       discord.New(discordApiUrl),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "discordchannel")
 		os.Exit(1)
