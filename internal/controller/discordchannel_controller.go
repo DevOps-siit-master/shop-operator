@@ -45,7 +45,10 @@ type DiscordChannelReconciler struct {
 	DiscordAPIClient       discord.Client
 }
 
-const discordChannelFinalizer = "shophub.devops-siit.io/discordchannel-finalizer"
+const (
+	discordChannelFinalizer = "shophub.devops-siit.io/discordchannel-finalizer"
+	conditionReadyType      = "Ready"
+)
 
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=discordchannels,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=discordchannels/status,verbs=get;update;patch
@@ -76,7 +79,7 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			log.Error(err, "discord bot credentials secret not found")
 
 			meta.SetStatusCondition(&discordChannel.Status.Conditions, metav1.Condition{
-				Type:    "Ready",
+				Type:    conditionReadyType,
 				Status:  metav1.ConditionFalse,
 				Reason:  "SecretNotFound",
 				Message: fmt.Sprintf("secret %s/%s not found", r.DiscordSecretNamespace, r.DiscordSecretName),
@@ -99,7 +102,7 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		log.Error(err, "malformed discord bot credentials secret")
 
 		meta.SetStatusCondition(&discordChannel.Status.Conditions, metav1.Condition{
-			Type:    "Ready",
+			Type:    conditionReadyType,
 			Status:  metav1.ConditionFalse,
 			Reason:  "SecretMissingKey",
 			Message: err.Error(),
@@ -148,7 +151,7 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if err != nil {
 			log.Error(err, "failed to create discord channel")
 			meta.SetStatusCondition(&discordChannel.Status.Conditions, metav1.Condition{
-				Type:    "Ready",
+				Type:    conditionReadyType,
 				Status:  metav1.ConditionFalse,
 				Reason:  "ChannelCreationFailed",
 				Message: err.Error(),
@@ -168,12 +171,11 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	if discordChannel.Status.WebhookID == "" {
-		// TODO: santize the name, create something for discord channel name see how to save secret
 		webhookId, webhookToken, err := r.DiscordAPIClient.CreateWebhook(ctx, string(token), discordChannel.Status.ChannelID, discordChannel.Spec.ChannelName)
 		if err != nil {
 			log.Error(err, "failed to create discord webhook")
 			meta.SetStatusCondition(&discordChannel.Status.Conditions, metav1.Condition{
-				Type:    "Ready",
+				Type:    conditionReadyType,
 				Status:  metav1.ConditionFalse,
 				Reason:  "WebhookCreationFailed",
 				Message: err.Error(),
@@ -208,7 +210,7 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 		discordChannel.Status.WebhookID = webhookId
 		meta.SetStatusCondition(&discordChannel.Status.Conditions, metav1.Condition{
-			Type:   "Ready",
+			Type:   conditionReadyType,
 			Status: metav1.ConditionTrue,
 			Reason: "ChannelAndWebhookReady",
 		})

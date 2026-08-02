@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
+
+var invalidChannelNameChars = regexp.MustCompile(`[^a-z0-9_-]`)
 
 type createChannelRequest struct {
 	Name string `json:"name"`
@@ -43,7 +47,7 @@ type ApiClient struct {
 
 func (client *ApiClient) CreateChannel(ctx context.Context, token, serverID, name string) (string, error) {
 	reqBody := createChannelRequest{
-		Name: name,
+		Name: sanitizeDiscordChannelName(name),
 		Type: 0,
 	}
 
@@ -65,7 +69,10 @@ func (client *ApiClient) CreateChannel(ctx context.Context, token, serverID, nam
 		return "", fmt.Errorf("failed to create discord channel: %w", err)
 	}
 
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("failed to read response discord API: %w", err)
@@ -106,7 +113,10 @@ func (client *ApiClient) CreateWebhook(ctx context.Context, token, channelID, na
 		return "", "", fmt.Errorf("failed to create discord channel: %w", err)
 	}
 
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to read response discord API: %w", err)
@@ -148,7 +158,9 @@ func (client *ApiClient) DeleteChannel(ctx context.Context, token, channelID str
 		return fmt.Errorf("failed to delete discord channel: %w", err)
 	}
 
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -160,4 +172,20 @@ func (client *ApiClient) DeleteChannel(ctx context.Context, token, channelID str
 	}
 
 	return nil
+}
+
+func sanitizeDiscordChannelName(channelName string) string {
+	name := strings.ToLower(channelName)
+	name = strings.ReplaceAll(name, " ", "-")
+	name = invalidChannelNameChars.ReplaceAllString(name, "")
+
+	if len(name) > 100 {
+		name = name[:100]
+	}
+
+	if name == "" {
+		name = "unnamed-channel"
+	}
+
+	return name
 }
