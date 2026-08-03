@@ -21,6 +21,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -43,6 +45,10 @@ var _ = Describe("Shop Controller", func() {
 			Name:      resourceName,
 			Namespace: resourceNamespace,
 		}
+		childName := types.NamespacedName{
+			Name:      "shop-" + resourceName,
+			Namespace: resourceNamespace,
+		}
 		shop := &shophubv1.Shop{}
 
 		BeforeEach(func() {
@@ -54,14 +60,18 @@ var _ = Describe("Shop Controller", func() {
 						Name:      resourceName,
 						Namespace: resourceNamespace,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: shophubv1.ShopSpec{
+						Availability:      shophubv1.AvailabilityHigh,
+						DatabaseType:      shophubv1.DatabaseStandard,
+						WalletRef:         "test-wallet",
+						DiscordChannelRef: "test-channel",
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &shophubv1.Shop{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
@@ -69,7 +79,8 @@ var _ = Describe("Shop Controller", func() {
 			By("Cleanup the specific resource instance Shop")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
-		It("should successfully reconcile the resource", func() {
+
+		It("should create a Deployment scaled to the availability tier", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &ShopReconciler{
 				Client: k8sClient,
@@ -80,8 +91,57 @@ var _ = Describe("Shop Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			By("checking the Deployment exists with 3 replicas (high availability)")
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, childName, deployment)).To(Succeed())
+			Expect(deployment.Spec.Replicas).NotTo(BeNil())
+			Expect(*deployment.Spec.Replicas).To(Equal(int32(3)))
+
+			By("checking the app container carries the wallet/discord references")
+			container := deployment.Spec.Template.Spec.Containers[0]
+			Expect(envValue(container.Env, "WALLET_REF")).To(Equal("test-wallet"))
+			Expect(envValue(container.Env, "DISCORD_CHANNEL_REF")).To(Equal("test-channel"))
+
+			By("checking the Service exists")
+			service := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, childName, service)).To(Succeed())
+
+			By("checking the Shop status reports the replica count")
+			updated := &shophubv1.Shop{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Replicas).To(Equal(int32(3)))
+		})
+
+		It("should scale a standard-availability Shop to 2 replicas", func() {
+			By("switching the Shop to standard availability")
+			resource := &shophubv1.Shop{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+			resource.Spec.Availability = shophubv1.AvailabilityStandard
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+
+			controllerReconciler := &ShopReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			deployment := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, childName, deployment)).To(Succeed())
+			Expect(*deployment.Spec.Replicas).To(Equal(int32(2)))
 		})
 	})
 })
+
+// envValue returns the plain value of the named env var, or "" if not found.
+func envValue(env []corev1.EnvVar, name string) string {
+	for _, e := range env {
+		if e.Name == name {
+			return e.Value
+		}
+	}
+	return ""
+}
