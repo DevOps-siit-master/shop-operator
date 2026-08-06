@@ -38,9 +38,9 @@ rules:
   - list
   - watch
 - apiGroups:
-  - redis.redis.opstreelabs.in
+  - postgresql.cnpg.io
   resources:
-  - redis
+  - clusters
   verbs:
   - create
   - delete
@@ -50,9 +50,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - postgresql.cnpg.io
+  - redis.redis.opstreelabs.in
   resources:
-  - clusters
+  - redis
   verbs:
   - create
   - delete
