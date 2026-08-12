@@ -1,0 +1,47 @@
+# Test manifest for Shop resource creation via kubectl.
+#
+#   kubectl apply -f config/samples/test_shop.yaml
+#   kubectl get shops,wallets,discordchannels
+#   kubectl describe shop shop-standard
+#   kubectl get shop shop-standard -o jsonpath='{.status}{"\n"}'
+#
+# Shop.spec requires walletRef and discordChannelRef, so the referenced
+# Wallet and DiscordChannel are created first in the same file.
+---
+apiVersion: shophub.devops-siit.io/v1
+kind: Wallet
+metadata:
+  name: wallet-test
+spec: {}
+---
+apiVersion: shophub.devops-siit.io/v1
+kind: DiscordChannel
+metadata:
+  name: discordchannel-test
+spec:
+  channelName: "test-shop-channel"
+  serverID: "000000000000000000"
+---
+# Standard tier: PostgreSQL (CNPG) backing store, single instance.
+apiVersion: shophub.devops-siit.io/v1
+kind: Shop
+metadata:
+  name: shop-standard
+spec:
+  displayName: "Standard Test Shop"
+  availability: standard          # standard | high
+  databaseType: standard          # standard (Postgres) | light (Redis)
+  walletRef: wallet-test
+  discordChannelRef: discordchannel-test
+---
+# Light + high availability: Redis backing store, multiple app instances.
+apiVersion: shophub.devops-siit.io/v1
+kind: Shop
+metadata:
+  name: shop-light-ha
+spec:
+  displayName: "Light HA Test Shop"
+  availability: high              # standard | high
+  databaseType: light             # standard (Postgres) | light (Redis)
+  walletRef: wallet-test
+  discordChannelRef: discordchannel-test
