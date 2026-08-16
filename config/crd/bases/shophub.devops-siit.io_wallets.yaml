@@ -46,6 +46,11 @@ spec:
           spec:
             description: spec defines the desired state of Wallet
             properties:
+              address:
+                description: |-
+                  Address is the admin-supplied payout address where user payments land.
+                  Propagated from the owning Shop's spec.wallet.address (spec 1.2).
+                type: string
               shopRef:
                 type: string
             type: object

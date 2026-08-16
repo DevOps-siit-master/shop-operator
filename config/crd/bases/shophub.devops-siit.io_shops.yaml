@@ -53,19 +53,42 @@ spec:
                 - standard
                 - light
                 type: string
-              discordChannelRef:
-                description: Discord Channel reference
-                type: string
+              discordChannel:
+                description: |-
+                  DiscordChannel holds the notification channel configuration. The operator
+                  creates and owns a DiscordChannel child resource from it.
+                properties:
+                  channelName:
+                    description: ChannelName is the Discord channel created/used for
+                      notifications.
+                    type: string
+                  serverID:
+                    description: ServerID identifies the Discord server (guild) the
+                      channel belongs to.
+                    type: string
+                required:
+                - channelName
+                - serverID
+                type: object
               displayName:
                 description: DisplayName is the human-readable shop name shown in
                   the ShopHub UI
                 type: string
-              walletRef:
-                description: Wallet reference
-                type: string
+              wallet:
+                description: |-
+                  Wallet holds the payment wallet configuration. The operator creates and
+                  owns a Wallet child resource from it.
+                properties:
+                  address:
+                    description: Address is the admin-supplied payout address where
+                      user payments land.
+                    type: string
+                required:
+                - address
+                type: object
             required:
-            - discordChannelRef
-            - walletRef
+            - discordChannel
+            - wallet
             type: object
           status:
             description: status defines the observed state of Shop
