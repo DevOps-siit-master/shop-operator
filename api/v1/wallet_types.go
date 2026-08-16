@@ -32,6 +32,11 @@ type WalletSpec struct {
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
 	ShopRef string `json:"shopRef,omitempty"`
+
+	// Address is the admin-supplied payout address where user payments land.
+	// Propagated from the owning Shop's spec.wallet.address (spec 1.2).
+	// +optional
+	Address string `json:"address,omitempty"`
 }
 
 // WalletStatus defines the observed state of Wallet.

@@ -97,6 +97,8 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=shops,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=shops/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=shops/finalizers,verbs=update
+// +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=wallets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=discordchannels,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -122,7 +124,19 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// 2. Translate the availability tier into a concrete replica count.
 	replicas := desiredReplicas(shop.Spec.Availability)
 
-	// 3. Ensure the database exists and collect the env vars the app needs to
+	// 3. Ensure the Wallet and DiscordChannel child resources exist. They are
+	//    owned by the Shop (owner reference), so they cascade-delete with it and
+	//    need no rollback on the caller's side. Their own controllers own their
+	//    behaviour (blockchain account, Discord webhook); we only materialise the
+	//    CR from the Shop's inline config.
+	if err := r.reconcileWallet(ctx, &shop); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileDiscordChannel(ctx, &shop); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 4. Ensure the database exists and collect the env vars the app needs to
 	//    connect to it. We still proceed to create the app even when the DB isn't
 	//    ready (the pod simply can't start until its credentials secret exists),
 	//    and requeue until the DB becomes active.
@@ -131,19 +145,19 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// 4. Reconcile the Shop app Deployment (create or converge) with the
+	// 5. Reconcile the Shop app Deployment (create or converge) with the
 	//    computed replicas and DB wiring.
 	deployment, err := r.reconcileDeployment(ctx, &shop, replicas, dbEnv)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 5. Reconcile the Service that fronts the Deployment.
+	// 6. Reconcile the Service that fronts the Deployment.
 	if err := r.reconcileService(ctx, &shop); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 6. Reflect observed state back onto the Shop status.
+	// 7. Reflect observed state back onto the Shop status.
 	ready := dbState == dbStateReady && deployment.Status.ReadyReplicas == replicas
 	if err := r.updateStatus(ctx, &shop, replicas, ready, dbState); err != nil {
 		return ctrl.Result{}, err
@@ -174,6 +188,16 @@ func desiredReplicas(a shophubv1.Availability) int32 {
 // resourceName builds a stable, DNS-safe name for a Shop's child objects.
 func resourceName(shop *shophubv1.Shop) string {
 	return "shop-" + shop.Name
+}
+
+// walletResourceName / discordResourceName derive the names of the Wallet and
+// DiscordChannel resources the Shop owns, from the Shop's name.
+func walletResourceName(shop *shophubv1.Shop) string {
+	return resourceName(shop) + "-wallet"
+}
+
+func discordResourceName(shop *shophubv1.Shop) string {
+	return resourceName(shop) + "-discord"
 }
 
 // labelsFor returns the recommended Kubernetes labels shared by all objects a
@@ -503,8 +527,9 @@ func shopAppEnv(shop *shophubv1.Shop, dbEnv []corev1.EnvVar) []corev1.EnvVar {
 		corev1.EnvVar{Name: "SHOP_NAME", Value: shop.Name},
 		corev1.EnvVar{Name: "SHOP_DISPLAY_NAME", Value: shop.Spec.DisplayName},
 		corev1.EnvVar{Name: "DATABASE_TYPE", Value: string(shop.Spec.DatabaseType)},
-		corev1.EnvVar{Name: "WALLET_REF", Value: shop.Spec.WalletRef},
-		corev1.EnvVar{Name: "DISCORD_CHANNEL_REF", Value: shop.Spec.DiscordChannelRef},
+		corev1.EnvVar{Name: "WALLET_REF", Value: walletResourceName(shop)},
+		corev1.EnvVar{Name: "WALLET_ADDRESS", Value: shop.Spec.Wallet.Address},
+		corev1.EnvVar{Name: "DISCORD_CHANNEL_REF", Value: discordResourceName(shop)},
 	)
 	return append(env, dbEnv...)
 }
@@ -532,6 +557,47 @@ func (r *ShopReconciler) reconcileService(ctx context.Context, shop *shophubv1.S
 			Protocol:   corev1.ProtocolTCP,
 		}}
 		return controllerutil.SetControllerReference(shop, service, r.Scheme)
+	})
+	return err
+}
+
+// reconcileWallet creates or converges the Wallet the Shop owns, propagating the
+// admin-supplied payout address from the Shop's inline config. The Wallet's own
+// controller acts on it independently; the owner reference makes it cascade with
+// the Shop.
+func (r *ShopReconciler) reconcileWallet(ctx context.Context, shop *shophubv1.Shop) error {
+	wallet := &shophubv1.Wallet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      walletResourceName(shop),
+			Namespace: shop.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, wallet, func() error {
+		wallet.Labels = labelsFor(shop)
+		wallet.Spec.ShopRef = shop.Name
+		wallet.Spec.Address = shop.Spec.Wallet.Address
+		return controllerutil.SetControllerReference(shop, wallet, r.Scheme)
+	})
+	return err
+}
+
+// reconcileDiscordChannel creates or converges the DiscordChannel the Shop owns,
+// propagating the channel/server config from the Shop's inline config. The
+// DiscordChannel controller manages the actual channel/webhook lifecycle.
+func (r *ShopReconciler) reconcileDiscordChannel(ctx context.Context, shop *shophubv1.Shop) error {
+	channel := &shophubv1.DiscordChannel{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      discordResourceName(shop),
+			Namespace: shop.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, channel, func() error {
+		channel.Labels = labelsFor(shop)
+		channel.Spec.ChannelName = shop.Spec.DiscordChannel.ChannelName
+		channel.Spec.ServerID = shop.Spec.DiscordChannel.ServerID
+		return controllerutil.SetControllerReference(shop, channel, r.Scheme)
 	})
 	return err
 }
@@ -589,6 +655,8 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&shophubv1.Shop{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&shophubv1.Wallet{}).
+		Owns(&shophubv1.DiscordChannel{}).
 		Named("shop").
 		Complete(r)
 }

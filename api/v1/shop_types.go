@@ -40,6 +40,25 @@ const (
 	DatabaseLight    DatabaseType = "light"    // redis
 )
 
+// WalletConfig is the inline wallet configuration carried on a Shop. The
+// ShopReconciler materialises it into an owned Wallet custom resource, so the
+// Wallet's lifecycle is tied to the Shop (spec 1.2 / 3.1).
+type WalletConfig struct {
+	// Address is the admin-supplied payout address where user payments land.
+	Address string `json:"address"`
+}
+
+// DiscordChannelConfig is the inline Discord notification configuration carried
+// on a Shop. The ShopReconciler materialises it into an owned DiscordChannel
+// custom resource.
+type DiscordChannelConfig struct {
+	// ChannelName is the Discord channel created/used for notifications.
+	ChannelName string `json:"channelName"`
+
+	// ServerID identifies the Discord server (guild) the channel belongs to.
+	ServerID string `json:"serverID"`
+}
+
 // ShopSpec defines the desired state of Shop
 type ShopSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
@@ -59,11 +78,13 @@ type ShopSpec struct {
 	// +optional
 	DisplayName string `json:"displayName,omitempty"`
 
-	// Wallet reference
-	WalletRef string `json:"walletRef"`
+	// Wallet holds the payment wallet configuration. The operator creates and
+	// owns a Wallet child resource from it.
+	Wallet WalletConfig `json:"wallet"`
 
-	// Discord Channel reference
-	DiscordChannelRef string `json:"discordChannelRef"`
+	// DiscordChannel holds the notification channel configuration. The operator
+	// creates and owns a DiscordChannel child resource from it.
+	DiscordChannel DiscordChannelConfig `json:"discordChannel"`
 }
 
 // ShopStatus defines the observed state of Shop.

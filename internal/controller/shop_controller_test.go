@@ -61,10 +61,15 @@ var _ = Describe("Shop Controller", func() {
 						Namespace: resourceNamespace,
 					},
 					Spec: shophubv1.ShopSpec{
-						Availability:      shophubv1.AvailabilityHigh,
-						DatabaseType:      shophubv1.DatabaseStandard,
-						WalletRef:         "test-wallet",
-						DiscordChannelRef: "test-channel",
+						Availability: shophubv1.AvailabilityHigh,
+						DatabaseType: shophubv1.DatabaseStandard,
+						Wallet: shophubv1.WalletConfig{
+							Address: "0xtest",
+						},
+						DiscordChannel: shophubv1.DiscordChannelConfig{
+							ChannelName: "test-channel",
+							ServerID:    "test-server",
+						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -100,8 +105,28 @@ var _ = Describe("Shop Controller", func() {
 
 			By("checking the app container carries the wallet/discord references")
 			container := deployment.Spec.Template.Spec.Containers[0]
-			Expect(envValue(container.Env, "WALLET_REF")).To(Equal("test-wallet"))
-			Expect(envValue(container.Env, "DISCORD_CHANNEL_REF")).To(Equal("test-channel"))
+			Expect(envValue(container.Env, "WALLET_REF")).To(Equal("shop-" + resourceName + "-wallet"))
+			Expect(envValue(container.Env, "WALLET_ADDRESS")).To(Equal("0xtest"))
+			Expect(envValue(container.Env, "DISCORD_CHANNEL_REF")).To(Equal("shop-" + resourceName + "-discord"))
+
+			By("checking the operator created the owned Wallet from the Shop's inline config")
+			wallet := &shophubv1.Wallet{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "shop-" + resourceName + "-wallet",
+				Namespace: resourceNamespace,
+			}, wallet)).To(Succeed())
+			Expect(wallet.Spec.Address).To(Equal("0xtest"))
+			Expect(wallet.OwnerReferences).NotTo(BeEmpty())
+
+			By("checking the operator created the owned DiscordChannel from the Shop's inline config")
+			channel := &shophubv1.DiscordChannel{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "shop-" + resourceName + "-discord",
+				Namespace: resourceNamespace,
+			}, channel)).To(Succeed())
+			Expect(channel.Spec.ChannelName).To(Equal("test-channel"))
+			Expect(channel.Spec.ServerID).To(Equal("test-server"))
+			Expect(channel.OwnerReferences).NotTo(BeEmpty())
 
 			By("checking the Service exists")
 			service := &corev1.Service{}
