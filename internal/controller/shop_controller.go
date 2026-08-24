@@ -22,11 +22,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
-	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,18 +42,34 @@ import (
 	shophubv1 "github.com/DevOps-siit-master/shop-operator/api/v1"
 )
 
+type microservice struct {
+	name        string
+	envVar      string
+	image       string
+	port        int32
+	ingressPath string
+}
+
+var shopMicroservices = []microservice{
+	{name: "auth", envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: ""},
+	{name: "order", envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"},
+	{name: "payment", envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"},
+	{name: "frontend", envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"},
+}
+
 const (
 	// replicaCountStandard / replicaCountHigh are the instance counts the spec
 	// mandates for each availability tier (spec 1.2 / 3.1).
 	replicaCountStandard = 2
 	replicaCountHigh     = 3
 
-	// defaultShopAppImage / defaultShopAppPort are used when the operator is not
-	// configured via the SHOP_APP_IMAGE / SHOP_APP_PORT env vars. The image is an
-	// operator-level concern (all shops run the same Shop app build), so it lives
-	// here rather than on the CRD.
-	defaultShopAppImage = "shophub/shop-app:latest"
-	defaultShopAppPort  = 8080
+	defaultImagePullPolicyEnv = "SHOP_IMAGE_PULL_POLICY"
+
+	shopDomainEnv     = "SHOP_INGRESS_DOMAIN"
+	defaultShopDomain = "localtest.me"
+
+	ingressClassEnv     = "SHOP_INGRESS_CLASS"
+	defaultIngressClass = "nginx"
 
 	// defaultRedisImage is the Redis image used for the light (Redis) tier via the
 	// OT-Container-Kit operator, overridable with REDIS_IMAGE.
@@ -105,6 +121,7 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=redis.redis.opstreelabs.in,resources=redis,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives a Shop CR towards its desired state: a database (via the
 // CNPG or OSS Redis operator), a Deployment of the Shop app scaled to the
@@ -145,21 +162,36 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// 5. Reconcile the Shop app Deployment (create or converge) with the
-	//    computed replicas and DB wiring.
-	deployment, err := r.reconcileDeployment(ctx, &shop, replicas, dbEnv)
+	authSecretName, err := r.ensureAuthSecret(ctx, &shop)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 6. Reconcile the Service that fronts the Deployment.
-	if err := r.reconcileService(ctx, &shop); err != nil {
+	// 5. Reconcile the Shop app Deployment (create or converge) with the
+	//    computed replicas and DB wiring.
+	allReady := dbState == dbStateReady
+	for _, ms := range shopMicroservices {
+		deployment, err := r.reconcileDeployment(ctx, &shop, ms, replicas, dbEnv, authSecretName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		// 6. Reconcile the Service that fronts the Deployment.
+		if err := r.reconcileService(ctx, &shop, ms); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		// 7. Reflect observed state back onto the Shop status.
+		if deployment.Status.ReadyReplicas != replicas {
+			allReady = false
+		}
+	}
+
+	if err := r.updateStatus(ctx, &shop, replicas, allReady, dbState); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 7. Reflect observed state back onto the Shop status.
-	ready := dbState == dbStateReady && deployment.Status.ReadyReplicas == replicas
-	if err := r.updateStatus(ctx, &shop, replicas, ready, dbState); err != nil {
+	if err := r.reconcileIngress(ctx, &shop); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -168,12 +200,56 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// DB operator missing or still provisioning; check back later.
 		log.Info("Database not ready yet, requeueing", "shop", shop.Name, "state", dbState)
 		return ctrl.Result{RequeueAfter: databaseReadyRequeue}, nil
-	case !ready:
+	case !allReady:
 		// App still rolling out; poll status until replicas are ready.
 		return ctrl.Result{RequeueAfter: deploymentPendingRequeue}, nil
 	default:
 		return ctrl.Result{}, nil
 	}
+}
+
+func serviceResourceName(shop *shophubv1.Shop, m microservice) string {
+	return resourceName(shop) + "-" + m.name
+}
+
+func labelsForComponent(shop *shophubv1.Shop, componentName string) map[string]string {
+	l := labelsFor(shop)
+	l["app.kubernetes.io/component"] = componentName
+	return l
+}
+
+func microserviceImage(m microservice) string {
+	if img := os.Getenv(m.envVar); img != "" {
+		return img
+	}
+	return m.image
+}
+
+func imagePullPolicy() corev1.PullPolicy {
+	if p := os.Getenv(defaultImagePullPolicyEnv); p != "" {
+		return corev1.PullPolicy(p)
+	}
+
+	return corev1.PullIfNotPresent
+}
+
+func shopHost(shop *shophubv1.Shop) string {
+	domain := os.Getenv(shopDomainEnv)
+	if domain == "" {
+		domain = defaultShopDomain
+	}
+	return shop.Name + "." + domain
+}
+
+func ingressClassName() string {
+	if c := os.Getenv(ingressClassEnv); c != "" {
+		return c
+	}
+	return defaultIngressClass
+}
+
+func ingressResourceName(shop *shophubv1.Shop) string {
+	return resourceName(shop) + "-ingress"
 }
 
 // desiredReplicas maps the availability tier to a replica count. Anything other
@@ -210,23 +286,134 @@ func labelsFor(shop *shophubv1.Shop) map[string]string {
 	}
 }
 
-// shopAppImage / shopAppPort read operator-level configuration with sane
-// defaults, so the image/port can be overridden per-environment without touching
-// the CRD or every Shop CR.
-func shopAppImage() string {
-	if img := os.Getenv("SHOP_APP_IMAGE"); img != "" {
-		return img
+// postgresAliasEnv re-exposes CNPG's connection secret under the POSTGRES_*
+// naming convention some services expect, alongside the DATABASE_* names.
+// this is a temp fix since order and payment service excpet env variables by a different name
+func postgresAliasEnv(dbEnv []corev1.EnvVar) []corev1.EnvVar {
+	alias := map[string]string{
+		"DATABASE_HOST":     "POSTGRES_HOST",
+		"DATABASE_USER":     "POSTGRES_USER",
+		"DATABASE_PASSWORD": "POSTGRES_PASSWORD",
+		"DATABASE_NAME":     "POSTGRES_DB",
+		"DATABASE_PORT":     "POSTGRES_PORT",
 	}
-	return defaultShopAppImage
-}
-
-func shopAppPort() int32 {
-	if p := os.Getenv("SHOP_APP_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil {
-			return int32(port)
+	var out []corev1.EnvVar
+	for _, e := range dbEnv {
+		if newName, ok := alias[e.Name]; ok {
+			out = append(out, corev1.EnvVar{Name: newName, ValueFrom: e.ValueFrom})
 		}
 	}
-	return defaultShopAppPort
+	return out
+}
+
+func (r *ShopReconciler) ensureAuthSecret(ctx context.Context, shop *shophubv1.Shop) (string, error) {
+	name := resourceName(shop) + "-auth-jwt"
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: shop.Namespace},
+	}
+
+	err := r.Get(ctx, client.ObjectKeyFromObject(secret), secret)
+	if err == nil {
+		return name, nil
+	}
+
+	if !apierrors.IsNotFound(err) {
+		return "", err
+	}
+
+	accessSecret, err := randomPassword()
+	if err != nil {
+		return "", err
+	}
+
+	refreshSecret, err := randomPassword()
+	if err != nil {
+		return "", err
+	}
+
+	secret.StringData = map[string]string{
+		"access":  accessSecret,
+		"refresh": refreshSecret,
+	}
+
+	if err := controllerutil.SetControllerReference(shop, secret, r.Scheme); err != nil {
+		return "", err
+	}
+
+	return name, r.Create(ctx, secret)
+}
+
+func (r *ShopReconciler) reconcileIngress(ctx context.Context, shop *shophubv1.Shop) error {
+	log := logf.FromContext(ctx)
+
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ingressResourceName(shop),
+			Namespace: shop.Namespace,
+		},
+	}
+
+	prefixType := networkingv1.PathTypePrefix
+	implSpecific := networkingv1.PathTypeImplementationSpecific
+	class := ingressClassName()
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, ingress, func() error {
+		ingress.Labels = labelsFor(shop)
+
+		if ingress.Annotations == nil {
+			ingress.Annotations = map[string]string{}
+		}
+
+		ingress.Annotations["nginx.ingress.kubernetes.io/rewrite-target"] = "/$2"
+		ingress.Annotations["nginx.ingress.kubernetes.io/use-regex"] = "true"
+
+		ingress.Spec.IngressClassName = &class
+
+		var paths []networkingv1.HTTPIngressPath
+		for _, m := range shopMicroservices {
+			if m.ingressPath == "" {
+				continue
+			}
+
+			p := m.ingressPath
+			pt := &prefixType
+			if p != "/" {
+				p = p + "(/|$)(.*)"
+				pt = &implSpecific
+			} else {
+				p = "/()(.*)"
+				pt = &implSpecific
+			}
+
+			paths = append(paths, networkingv1.HTTPIngressPath{
+				Path:     p,
+				PathType: pt,
+				Backend: networkingv1.IngressBackend{
+					Service: &networkingv1.IngressServiceBackend{
+						Name: serviceResourceName(shop, m),
+						Port: networkingv1.ServiceBackendPort{Number: m.port},
+					},
+				},
+			})
+		}
+
+		ingress.Spec.Rules = []networkingv1.IngressRule{{
+			Host: shopHost(shop),
+			IngressRuleValue: networkingv1.IngressRuleValue{
+				HTTP: &networkingv1.HTTPIngressRuleValue{Paths: paths},
+			},
+		}}
+
+		return controllerutil.SetControllerReference(shop, ingress, r.Scheme)
+	})
+	if err != nil {
+		return err
+	}
+	if op != controllerutil.OperationResultNone {
+		log.Info("Reconciled Ingress", "operation", op, "host", shopHost(shop))
+	}
+	return nil
+
 }
 
 // reconcileDatabase provisions the backing store for the Shop and returns the
@@ -478,16 +665,15 @@ func (r *ShopReconciler) createOrIgnoreMissingCRD(
 // CreateOrUpdate so repeated reconciles are idempotent and drift (e.g. a manual
 // replica change) is corrected back to the desired state.
 func (r *ShopReconciler) reconcileDeployment(
-	ctx context.Context, shop *shophubv1.Shop, replicas int32, dbEnv []corev1.EnvVar,
+	ctx context.Context, shop *shophubv1.Shop, m microservice, replicas int32, dbEnv []corev1.EnvVar, authSecretName string,
 ) (*appsv1.Deployment, error) {
 	log := logf.FromContext(ctx)
 
-	labels := labelsFor(shop)
-	port := shopAppPort()
+	labels := labelsForComponent(shop, m.name)
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName(shop),
+			Name:      serviceResourceName(shop, m),
 			Namespace: shop.Namespace,
 		},
 	}
@@ -497,51 +683,77 @@ func (r *ShopReconciler) reconcileDeployment(
 		deployment.Spec.Replicas = &replicas
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
 		deployment.Spec.Template.Labels = labels
-		deployment.Spec.Template.Spec.Containers = []corev1.Container{{
-			Name:  "shop",
-			Image: shopAppImage(),
-			Ports: []corev1.ContainerPort{{
-				Name:          "http",
-				ContainerPort: port,
-				Protocol:      corev1.ProtocolTCP,
-			}},
-			Env: shopAppEnv(shop, dbEnv),
+
+		if len(deployment.Spec.Template.Spec.Containers) == 0 {
+			deployment.Spec.Template.Spec.Containers = []corev1.Container{{}}
+		}
+
+		c := &deployment.Spec.Template.Spec.Containers[0]
+		c.Name = m.name
+		c.Image = microserviceImage(m)
+		c.ImagePullPolicy = imagePullPolicy()
+		c.Ports = []corev1.ContainerPort{{
+			Name:          "http",
+			ContainerPort: m.port,
+			Protocol:      corev1.ProtocolTCP,
 		}}
-		// Own the Deployment so it is deleted with the Shop.
+		c.Env = shopAppEnv(shop, m, dbEnv, authSecretName)
+
 		return controllerutil.SetControllerReference(shop, deployment, r.Scheme)
 	})
 	if err != nil {
 		return nil, err
 	}
 	if op != controllerutil.OperationResultNone {
-		log.Info("Reconciled Deployment", "operation", op, "replicas", replicas)
+		log.Info("Reconciled Deployment", "operation", op, "service", m.name, "replicas", replicas)
 	}
 	return deployment, nil
 }
 
 // shopAppEnv assembles the container env: identity/config from the Shop spec
 // plus the database connection vars.
-func shopAppEnv(shop *shophubv1.Shop, dbEnv []corev1.EnvVar) []corev1.EnvVar {
-	env := make([]corev1.EnvVar, 0, 5+len(dbEnv))
-	env = append(env,
-		corev1.EnvVar{Name: "SHOP_NAME", Value: shop.Name},
-		corev1.EnvVar{Name: "SHOP_DISPLAY_NAME", Value: shop.Spec.DisplayName},
-		corev1.EnvVar{Name: "DATABASE_TYPE", Value: string(shop.Spec.DatabaseType)},
-		corev1.EnvVar{Name: "WALLET_REF", Value: walletResourceName(shop)},
-		corev1.EnvVar{Name: "WALLET_ADDRESS", Value: shop.Spec.Wallet.Address},
-		corev1.EnvVar{Name: "DISCORD_CHANNEL_REF", Value: discordResourceName(shop)},
-	)
-	return append(env, dbEnv...)
+func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, authSecretName string) []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{Name: "SHOP_NAME", Value: shop.Name},
+		{Name: "SERVICE_NAME", Value: m.name},
+		{Name: "SHOP_DISPLAY_NAME", Value: shop.Spec.DisplayName},
+		{Name: "DATABASE_TYPE", Value: string(shop.Spec.DatabaseType)},
+		{Name: "DISCORD_CHANNEL_REF", Value: discordResourceName(shop)},
+	}
+
+	switch m.name {
+	case "frontend":
+		env = append(env,
+			corev1.EnvVar{Name: "AUTH_API_URL", Value: "http://" + resourceName(shop) + "-auth"},
+			corev1.EnvVar{Name: "VITE_ORDER_API", Value: "http://" + resourceName(shop) + "-order"},
+			corev1.EnvVar{Name: "VITE_PAYMENT_API", Value: "http://" + resourceName(shop) + "-payment"},
+		)
+	case "payment":
+		env = append(env,
+			corev1.EnvVar{Name: "WALLET_REF", Value: walletResourceName(shop)},
+			corev1.EnvVar{Name: "WALLET_ADDRESS", Value: shop.Spec.Wallet.Address},
+		)
+		env = append(env, postgresAliasEnv(dbEnv)...)
+	case "auth":
+		env = append(env,
+			corev1.EnvVar{Name: "JWT_ACCESS_SECRET", ValueFrom: secretKeyRef(authSecretName, "access")},
+			corev1.EnvVar{Name: "JWT_REFRESH_SECRET", ValueFrom: secretKeyRef(authSecretName, "refresh")},
+		)
+		env = append(env, dbEnv...)
+	case "order":
+		env = append(env, postgresAliasEnv(dbEnv)...)
+	}
+
+	return env
 }
 
 // reconcileService creates or converges a ClusterIP Service targeting the app.
-func (r *ShopReconciler) reconcileService(ctx context.Context, shop *shophubv1.Shop) error {
-	labels := labelsFor(shop)
-	port := shopAppPort()
+func (r *ShopReconciler) reconcileService(ctx context.Context, shop *shophubv1.Shop, m microservice) error {
+	labels := labelsForComponent(shop, m.name)
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName(shop),
+			Name:      serviceResourceName(shop, m),
 			Namespace: shop.Namespace,
 		},
 	}
@@ -552,7 +764,7 @@ func (r *ShopReconciler) reconcileService(ctx context.Context, shop *shophubv1.S
 		service.Spec.Type = corev1.ServiceTypeClusterIP
 		service.Spec.Ports = []corev1.ServicePort{{
 			Name:       "http",
-			Port:       port,
+			Port:       m.port,
 			TargetPort: intstr.FromString("http"),
 			Protocol:   corev1.ProtocolTCP,
 		}}
@@ -656,6 +868,7 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&shophubv1.Wallet{}).
+		Owns(&networkingv1.Ingress{}).
 		Owns(&shophubv1.DiscordChannel{}).
 		Named("shop").
 		Complete(r)
