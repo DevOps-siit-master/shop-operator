@@ -55,6 +55,14 @@ const (
 	defaultShopAppImage = "shophub/shop-app:latest"
 	defaultShopAppPort  = 8080
 
+	// defaultShopAppPullPolicy defaults to IfNotPresent so locally-loaded images
+	// (e.g. `kind load` in dev clusters) are actually used instead of always
+	// being re-pulled from a registry — a :latest tag would otherwise default to
+	// Always and ImagePullBackOff when the image only exists on the node. Matches
+	// the Redis tier, which is already IfNotPresent. Override with
+	// SHOP_APP_PULL_POLICY (Always/IfNotPresent/Never) for registry-backed envs.
+	defaultShopAppPullPolicy = corev1.PullIfNotPresent
+
 	// defaultRedisImage is the Redis image used for the light (Redis) tier via the
 	// OT-Container-Kit operator, overridable with REDIS_IMAGE.
 	defaultRedisImage = "quay.io/opstree/redis:v7.0.15"
@@ -227,6 +235,14 @@ func shopAppPort() int32 {
 		}
 	}
 	return defaultShopAppPort
+}
+
+func shopAppPullPolicy() corev1.PullPolicy {
+	switch corev1.PullPolicy(os.Getenv("SHOP_APP_PULL_POLICY")) {
+	case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		return corev1.PullPolicy(os.Getenv("SHOP_APP_PULL_POLICY"))
+	}
+	return defaultShopAppPullPolicy
 }
 
 // reconcileDatabase provisions the backing store for the Shop and returns the
@@ -498,8 +514,9 @@ func (r *ShopReconciler) reconcileDeployment(
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
 		deployment.Spec.Template.Labels = labels
 		deployment.Spec.Template.Spec.Containers = []corev1.Container{{
-			Name:  "shop",
-			Image: shopAppImage(),
+			Name:            "shop",
+			Image:           shopAppImage(),
+			ImagePullPolicy: shopAppPullPolicy(),
 			Ports: []corev1.ContainerPort{{
 				Name:          "http",
 				ContainerPort: port,
