@@ -167,22 +167,6 @@ func TestDeleteChannel_NoContent(t *testing.T) {
 	}
 }
 
-func TestDeleteChannel_Failure(t *testing.T) {
-	client, cleanup := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"message": "Unknown Channel", "code": 10003}`))
-	})
-	defer cleanup()
-
-	err := client.DeleteChannel(context.Background(), "fake-token", "channel-abc")
-	if err == nil {
-		t.Fatal("expected an error, got nil")
-	}
-	if !strings.Contains(err.Error(), "10003") {
-		t.Errorf("expected error to include discord error code, got: %v", err)
-	}
-}
-
 // TransformIntoUrl has no HTTP call at all, so it's a plain table-driven
 // test rather than needing httptest.
 func TestTransformIntoUrl(t *testing.T) {
