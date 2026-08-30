@@ -51,10 +51,10 @@ type microservice struct {
 }
 
 var (
-	msAuth     = microservice{name: "auth", envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: ""}
-	msOrder    = microservice{name: "order", envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"}
-	msPayment  = microservice{name: "payment", envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"}
-	msFrontend = microservice{name: "frontend", envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"}
+	msAuth     = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: ""}
+	msOrder    = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"}
+	msPayment  = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"}
+	msFrontend = microservice{name: frontendServiceName, envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"}
 
 	shopMicroservices = []microservice{msAuth, msOrder, msPayment, msFrontend}
 )
@@ -92,6 +92,11 @@ const (
 	// deploymentPendingRequeue is a shorter poll used to refresh status while the
 	// app Deployment is still rolling out.
 	deploymentPendingRequeue = 15 * time.Second
+
+	authServiceName     = "auth"
+	paymentServiceName  = "payment"
+	orderServiceName    = "order"
+	frontendServiceName = "frontend"
 )
 
 // databaseState describes how far along the Shop's backing database is. It lets
@@ -725,28 +730,28 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 	}
 
 	switch m.name {
-	case "frontend":
+	case frontendServiceName:
 		env = append(env,
 			corev1.EnvVar{Name: "AUTH_API_URL", Value: "http://" + resourceName(shop) + "-auth"},
 			corev1.EnvVar{Name: "VITE_ORDER_API", Value: "http://" + resourceName(shop) + "-order"},
 			corev1.EnvVar{Name: "VITE_PAYMENT_API", Value: "http://" + resourceName(shop) + "-payment"},
 		)
-	case "payment":
+	case paymentServiceName:
 		env = append(env,
 			corev1.EnvVar{Name: "WALLET_REF", Value: walletResourceName(shop)},
 			corev1.EnvVar{Name: "SHOP_WALLET_ADDRESS", Value: shop.Spec.Wallet.Address},
-			corev1.EnvVar{Name: "ORDER_API_URL", Value: serviceURL(shop, "order", msOrder.port)},
+			corev1.EnvVar{Name: "ORDER_API_URL", Value: serviceURL(shop, orderServiceName, msOrder.port)},
 			corev1.EnvVar{Name: "USDT_ADDRESS", Value: usdtAddress()},
 			corev1.EnvVar{Name: "SEPOLIA_RPC_URL", Value: sepoliaRPCURL()},
 		)
 		env = append(env, dbEnv...)
-	case "auth":
+	case authServiceName:
 		env = append(env,
 			corev1.EnvVar{Name: "JWT_ACCESS_SECRET", ValueFrom: secretKeyRef(authSecretName, "access")},
 			corev1.EnvVar{Name: "JWT_REFRESH_SECRET", ValueFrom: secretKeyRef(authSecretName, "refresh")},
 		)
 		env = append(env, dbEnv...)
-	case "order":
+	case orderServiceName:
 		env = append(env, dbEnv...)
 	}
 
