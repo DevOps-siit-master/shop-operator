@@ -344,7 +344,6 @@ func (r *ShopReconciler) reconcileIngress(ctx context.Context, shop *shophubv1.S
 		},
 	}
 
-	prefixType := networkingv1.PathTypePrefix
 	implSpecific := networkingv1.PathTypeImplementationSpecific
 	class := ingressClassName()
 
@@ -367,13 +366,11 @@ func (r *ShopReconciler) reconcileIngress(ctx context.Context, shop *shophubv1.S
 			}
 
 			p := m.ingressPath
-			pt := &prefixType
+			pt := &implSpecific
 			if p != "/" {
 				p = p + "(/|$)(.*)"
-				pt = &implSpecific
 			} else {
 				p = "/()(.*)"
-				pt = &implSpecific
 			}
 
 			paths = append(paths, networkingv1.HTTPIngressPath{
