@@ -50,12 +50,14 @@ type microservice struct {
 	ingressPath string
 }
 
-var shopMicroservices = []microservice{
-	{name: "auth", envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: ""},
-	{name: "order", envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"},
-	{name: "payment", envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"},
-	{name: "frontend", envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"},
-}
+var (
+	msAuth     = microservice{name: "auth", envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: ""}
+	msOrder    = microservice{name: "order", envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"}
+	msPayment  = microservice{name: "payment", envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"}
+	msFrontend = microservice{name: "frontend", envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"}
+
+	shopMicroservices = []microservice{msAuth, msOrder, msPayment, msFrontend}
+)
 
 const (
 	// replicaCountStandard / replicaCountHigh are the instance counts the spec
@@ -70,6 +72,11 @@ const (
 
 	ingressClassEnv     = "SHOP_INGRESS_CLASS"
 	defaultIngressClass = "nginx"
+
+	usdtAddressEnv       = "USDT_ADDRESS"
+	sepoliaRPCURLEnv     = "SEPOLIA_RPC_URL"
+	usdtAddressDefault   = ""
+	sepoliaRPCURLDefault = "https://sepolia.drpc.org"
 
 	// defaultRedisImage is the Redis image used for the light (Redis) tier via the
 	// OT-Container-Kit operator, overridable with REDIS_IMAGE.
@@ -261,6 +268,10 @@ func desiredReplicas(a shophubv1.Availability) int32 {
 	return replicaCountStandard
 }
 
+func serviceURL(shop *shophubv1.Shop, name string, port int32) string {
+	return fmt.Sprintf("http://%s-%s:%d", resourceName(shop), name, port)
+}
+
 // resourceName builds a stable, DNS-safe name for a Shop's child objects.
 func resourceName(shop *shophubv1.Shop) string {
 	return "shop-" + shop.Name
@@ -284,26 +295,6 @@ func labelsFor(shop *shophubv1.Shop) map[string]string {
 		"app.kubernetes.io/instance":   shop.Name,
 		"app.kubernetes.io/managed-by": "shop-operator",
 	}
-}
-
-// postgresAliasEnv re-exposes CNPG's connection secret under the POSTGRES_*
-// naming convention some services expect, alongside the DATABASE_* names.
-// this is a temp fix since order and payment service excpet env variables by a different name
-func postgresAliasEnv(dbEnv []corev1.EnvVar) []corev1.EnvVar {
-	alias := map[string]string{
-		"DATABASE_HOST":     "POSTGRES_HOST",
-		"DATABASE_USER":     "POSTGRES_USER",
-		"DATABASE_PASSWORD": "POSTGRES_PASSWORD",
-		"DATABASE_NAME":     "POSTGRES_DB",
-		"DATABASE_PORT":     "POSTGRES_PORT",
-	}
-	var out []corev1.EnvVar
-	for _, e := range dbEnv {
-		if newName, ok := alias[e.Name]; ok {
-			out = append(out, corev1.EnvVar{Name: newName, ValueFrom: e.ValueFrom})
-		}
-	}
-	return out
 }
 
 func (r *ShopReconciler) ensureAuthSecret(ctx context.Context, shop *shophubv1.Shop) (string, error) {
@@ -710,6 +701,20 @@ func (r *ShopReconciler) reconcileDeployment(
 	return deployment, nil
 }
 
+func sepoliaRPCURL() string {
+	if sepoliaRPCURL := os.Getenv(sepoliaRPCURLEnv); sepoliaRPCURL != "" {
+		return sepoliaRPCURL
+	}
+	return sepoliaRPCURLDefault
+}
+
+func usdtAddress() string {
+	if usdtAdress := os.Getenv(usdtAddressEnv); usdtAdress != "" {
+		return usdtAdress
+	}
+	return usdtAddressDefault
+}
+
 // shopAppEnv assembles the container env: identity/config from the Shop spec
 // plus the database connection vars.
 func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, authSecretName string) []corev1.EnvVar {
@@ -719,6 +724,7 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 		{Name: "SHOP_DISPLAY_NAME", Value: shop.Spec.DisplayName},
 		{Name: "DATABASE_TYPE", Value: string(shop.Spec.DatabaseType)},
 		{Name: "DISCORD_CHANNEL_REF", Value: discordResourceName(shop)},
+		{Name: "PORT", Value: fmt.Sprintf("%d", m.port)},
 	}
 
 	switch m.name {
@@ -731,9 +737,12 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 	case "payment":
 		env = append(env,
 			corev1.EnvVar{Name: "WALLET_REF", Value: walletResourceName(shop)},
-			corev1.EnvVar{Name: "WALLET_ADDRESS", Value: shop.Spec.Wallet.Address},
+			corev1.EnvVar{Name: "SHOP_WALLET_ADDRESS", Value: shop.Spec.Wallet.Address},
+			corev1.EnvVar{Name: "ORDER_API_URL", Value: serviceURL(shop, "order", msOrder.port)},
+			corev1.EnvVar{Name: "USDT_ADDRESS", Value: usdtAddress()},
+			corev1.EnvVar{Name: "SEPOLIA_RPC_URL", Value: sepoliaRPCURL()},
 		)
-		env = append(env, postgresAliasEnv(dbEnv)...)
+		env = append(env, dbEnv...)
 	case "auth":
 		env = append(env,
 			corev1.EnvVar{Name: "JWT_ACCESS_SECRET", ValueFrom: secretKeyRef(authSecretName, "access")},
@@ -741,7 +750,7 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 		)
 		env = append(env, dbEnv...)
 	case "order":
-		env = append(env, postgresAliasEnv(dbEnv)...)
+		env = append(env, dbEnv...)
 	}
 
 	return env

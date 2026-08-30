@@ -167,11 +167,12 @@ func (client *ApiClient) DeleteChannel(ctx context.Context, token, channelID str
 		return fmt.Errorf("failed to read response discord API: %w", err)
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+		return nil
+	default:
 		return fmt.Errorf("discord API returned status %d: %s", resp.StatusCode, string(respBytes))
 	}
-
-	return nil
 }
 
 func sanitizeDiscordChannelName(channelName string) string {
