@@ -51,12 +51,13 @@ type microservice struct {
 }
 
 var (
-	msAuth     = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: ""}
-	msOrder    = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"}
-	msPayment  = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"}
-	msFrontend = microservice{name: frontendServiceName, envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"}
+	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: ""}
+	msOrder     = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"}
+	msPayment   = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"}
+	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api"}
+	msFrontend  = microservice{name: frontendServiceName, envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"}
 
-	shopMicroservices = []microservice{msAuth, msOrder, msPayment, msFrontend}
+	shopMicroservices = []microservice{msAuth, msOrder, msPayment, msInventory, msFrontend}
 )
 
 const (
@@ -93,10 +94,11 @@ const (
 	// app Deployment is still rolling out.
 	deploymentPendingRequeue = 15 * time.Second
 
-	authServiceName     = "auth"
-	paymentServiceName  = "payment"
-	orderServiceName    = "order"
-	frontendServiceName = "frontend"
+	authServiceName      = "auth"
+	paymentServiceName   = "payment"
+	orderServiceName     = "order"
+	frontendServiceName  = "frontend"
+	inventoryServiceName = "inventory"
 )
 
 // databaseState describes how far along the Shop's backing database is. It lets
@@ -735,6 +737,7 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 			corev1.EnvVar{Name: "AUTH_API_URL", Value: "http://" + resourceName(shop) + "-auth"},
 			corev1.EnvVar{Name: "VITE_ORDER_API", Value: "http://" + resourceName(shop) + "-order"},
 			corev1.EnvVar{Name: "VITE_PAYMENT_API", Value: "http://" + resourceName(shop) + "-payment"},
+			corev1.EnvVar{Name: "VITE_INVENTORY_API", Value: "http://" + resourceName(shop) + "-inventory"},
 		)
 	case paymentServiceName:
 		env = append(env,
@@ -752,6 +755,8 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 		)
 		env = append(env, dbEnv...)
 	case orderServiceName:
+		env = append(env, dbEnv...)
+	case inventoryServiceName:
 		env = append(env, dbEnv...)
 	}
 
