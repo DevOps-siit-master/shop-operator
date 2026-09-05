@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # da može da napravi git tag
+  id-token: write   # cosign keyless signing (OIDC → Sigstore/Rekor)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/shop-operator
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version from conventional commits
+        id: tag
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: false
+
+      - name: Log in to Docker Hub
+        if: steps.tag.outputs.new_version != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: steps.tag.outputs.new_version != ''
+        uses: docker/setup-buildx-action@v3
+
+      # Build to the local daemon first so the image can be scanned BEFORE it
+      # is ever published — a failing scan blocks the push.
+      - name: Build image (load locally)
+        if: steps.tag.outputs.new_version != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.new_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image (Trivy) — gate before push
+        if: steps.tag.outputs.new_version != ''
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ steps.tag.outputs.new_version }}
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      # Cache hit makes this near-instant; publishes the vetted image.
+      - name: Push image
+        id: push
+        if: steps.tag.outputs.new_version != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.tag.outputs.new_version }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        if: steps.tag.outputs.new_version != ''
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless signature (no long-lived key) tied to this workflow's OIDC
+      # identity; verifiable with `cosign verify`.
+      - name: Sign image (keyless)
+        if: steps.tag.outputs.new_version != ''
+        run: cosign sign --yes "${IMAGE}@${{ steps.push.outputs.digest }}"
+
+      - name: Generate SBOM (Syft)
+        if: steps.tag.outputs.new_version != ''
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM artifact
+        if: steps.tag.outputs.new_version != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ steps.tag.outputs.new_version }}
+          path: sbom.spdx.json
