@@ -19,12 +19,15 @@ package controller
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,15 +47,16 @@ import (
 )
 
 type microservice struct {
-	name        string
-	envVar      string
-	image       string
-	port        int32
-	ingressPath string
+	name          string
+	envVar        string
+	image         string
+	port          int32
+	ingressPath   string
+	hasMigrations bool
 }
 
 var (
-	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: ""}
+	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "", hasMigrations: true}
 	msOrder     = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"}
 	msPayment   = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"}
 	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api"}
@@ -136,6 +141,7 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=redis.redis.opstreelabs.in,resources=redis,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 
 // Reconcile drives a Shop CR towards its desired state: a database (via the
 // CNPG or OSS Redis operator), a Deployment of the Shop app scaled to the
@@ -185,6 +191,18 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	//    computed replicas and DB wiring.
 	allReady := dbState == dbStateReady
 	for _, ms := range shopMicroservices {
+		if dbState == dbStateReady {
+			migrated, err := r.reconcileMigrationJob(ctx, &shop, ms, dbEnv, authSecretName)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !migrated {
+				allReady = false
+			}
+		} else if ms.hasMigrations {
+			allReady = false
+		}
+
 		deployment, err := r.reconcileDeployment(ctx, &shop, ms, replicas, dbEnv, authSecretName)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -462,6 +480,7 @@ func (r *ShopReconciler) reconcilePostgres(
 		{Name: "DATABASE_NAME", ValueFrom: secretKeyRef(appSecret, "dbname")},
 		{Name: "DATABASE_USER", ValueFrom: secretKeyRef(appSecret, "username")},
 		{Name: "DATABASE_PASSWORD", ValueFrom: secretKeyRef(appSecret, "password")},
+		{Name: "DATABASE_KIND", Value: "postgres"},
 	}
 	return env, databaseStateFrom(exists, cluster, cnpgClusterReady), nil
 }
@@ -508,9 +527,10 @@ func (r *ShopReconciler) reconcileRedis(
 	}
 
 	env := []corev1.EnvVar{
-		{Name: "REDIS_HOST", Value: redisName},
-		{Name: "REDIS_PORT", Value: "6379"},
-		{Name: "REDIS_PASSWORD", ValueFrom: secretKeyRef(authSecret, "password")},
+		{Name: "DATABASE_HOST", Value: redisName},
+		{Name: "DATABASE_PORT", Value: "6379"},
+		{Name: "DATABASE_PASSWORD", ValueFrom: secretKeyRef(authSecret, "password")},
+		{Name: "DATABASE_KIND", Value: "redis"},
 	}
 	if !exists {
 		return env, dbStateOperatorMissing, nil
@@ -787,6 +807,65 @@ func (r *ShopReconciler) reconcileService(ctx context.Context, shop *shophubv1.S
 		return controllerutil.SetControllerReference(shop, service, r.Scheme)
 	})
 	return err
+}
+
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:8]
+}
+
+func (r *ShopReconciler) reconcileMigrationJob(
+	ctx context.Context, shop *shophubv1.Shop, svc microservice, dbEnv []corev1.EnvVar, authSecretName string,
+) (done bool, err error) {
+
+	if !svc.hasMigrations || shop.Spec.DatabaseType != shophubv1.DatabaseStandard {
+		return true, nil
+	}
+
+	image := microserviceImage(svc)
+	name := fmt.Sprintf("%s-%s-migrate-%s", shop.Name, svc.name, shortHash(image))
+
+	var job batchv1.Job
+	err = r.Get(ctx, types.NamespacedName{Namespace: shop.Namespace, Name: name}, &job)
+	if apierrors.IsNotFound(err) {
+		job = r.buildMigrationJob(shop, svc, name, image, dbEnv, authSecretName)
+		if err := controllerutil.SetControllerReference(shop, &job, r.Scheme); err != nil {
+			return false, err
+		}
+		return false, r.Create(ctx, &job) // created; not done yet
+	}
+	if err != nil {
+		return false, err
+	}
+	return job.Status.Succeeded > 0, nil
+}
+
+func (r *ShopReconciler) buildMigrationJob(
+	shop *shophubv1.Shop, svc microservice, name, image string, dbEnv []corev1.EnvVar, authSecretName string,
+) batchv1.Job {
+	backoff, ttl := int32(3), int32(600)
+	return batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: shop.Namespace,
+			Labels: labelsForComponent(shop, svc.name+"-migrate"),
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            &backoff,
+			TTLSecondsAfterFinished: &ttl,
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{{
+						Name:  "migrate",
+						Image: image,
+						Command: []string{"node", "node_modules/typeorm/cli.js",
+							"migration:run", "-d", "dist/database/data-source.js"},
+						Env: shopAppEnv(shop, svc, dbEnv, authSecretName), // same env the app gets
+					}},
+				},
+			},
+		},
+	}
 }
 
 // reconcileWallet creates or converges the Wallet the Shop owns, propagating the
