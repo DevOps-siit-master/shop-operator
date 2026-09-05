@@ -56,7 +56,7 @@ type microservice struct {
 }
 
 var (
-	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "", hasMigrations: true}
+	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "/auth-api", hasMigrations: true}
 	msOrder     = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"}
 	msPayment   = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"}
 	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api"}
@@ -777,6 +777,9 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 	case orderServiceName:
 		env = append(env, dbEnv...)
 	case inventoryServiceName:
+		env = append(env,
+			corev1.EnvVar{Name: "JWT_ACCESS_SECRET", ValueFrom: secretKeyRef(authSecretName, "access")},
+		)
 		env = append(env, dbEnv...)
 	}
 
