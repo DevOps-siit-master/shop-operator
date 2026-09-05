@@ -77,6 +77,11 @@ const (
 
 	defaultImagePullPolicyEnv = "SHOP_IMAGE_PULL_POLICY"
 
+	monitoringAPIGroup = "monitoring.coreos.com"
+	keyName            = "name"
+	keyKey             = "key"
+	defaultInterval30s = "30s"
+
 	shopDomainEnv     = "SHOP_INGRESS_DOMAIN"
 	defaultShopDomain = "localtest.me"
 
@@ -153,6 +158,8 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheusrules,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=alertmanagerconfigs,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives a Shop CR towards its desired state: a database (via the
 // CNPG or OSS Redis operator), a Deployment of the Shop app scaled to the
@@ -187,6 +194,12 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileGrafanaDashboard(ctx, &shop); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcilePrometheusRule(ctx, &shop); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileAlertmanagerConfig(ctx, &shop); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -955,7 +968,7 @@ func (r *ShopReconciler) reconcileServiceMonitor(ctx context.Context, shop *shop
 
 	sm := &unstructured.Unstructured{}
 	sm.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "monitoring.coreos.com",
+		Group:   monitoringAPIGroup,
 		Version: "v1",
 		Kind:    "ServiceMonitor",
 	})
@@ -982,7 +995,7 @@ func (r *ShopReconciler) reconcileServiceMonitor(ctx context.Context, shop *shop
 				},
 				"matchExpressions": []any{
 					map[string]any{
-						"key":      "app.kubernetes.io/component",
+						keyKey:     "app.kubernetes.io/component",
 						"operator": "In",
 						"values":   components,
 					},
@@ -992,7 +1005,7 @@ func (r *ShopReconciler) reconcileServiceMonitor(ctx context.Context, shop *shop
 				map[string]any{
 					"port":     httpPortName,
 					"path":     "/metrics",
-					"interval": "30s",
+					"interval": defaultInterval30s,
 				},
 			},
 		}, "spec"); err != nil {
