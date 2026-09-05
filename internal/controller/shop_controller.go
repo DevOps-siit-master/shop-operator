@@ -480,6 +480,7 @@ func (r *ShopReconciler) reconcilePostgres(
 		{Name: "DATABASE_NAME", ValueFrom: secretKeyRef(appSecret, "dbname")},
 		{Name: "DATABASE_USER", ValueFrom: secretKeyRef(appSecret, "username")},
 		{Name: "DATABASE_PASSWORD", ValueFrom: secretKeyRef(appSecret, "password")},
+		{Name: "DATABASE_KIND", Value: "postgres"},
 	}
 	return env, databaseStateFrom(exists, cluster, cnpgClusterReady), nil
 }
@@ -526,9 +527,10 @@ func (r *ShopReconciler) reconcileRedis(
 	}
 
 	env := []corev1.EnvVar{
-		{Name: "REDIS_HOST", Value: redisName},
-		{Name: "REDIS_PORT", Value: "6379"},
-		{Name: "REDIS_PASSWORD", ValueFrom: secretKeyRef(authSecret, "password")},
+		{Name: "DATABASE_HOST", Value: redisName},
+		{Name: "DATABASE_PORT", Value: "6379"},
+		{Name: "DATABASE_PASSWORD", ValueFrom: secretKeyRef(authSecret, "password")},
+		{Name: "DATABASE_KIND", Value: "redis"},
 	}
 	if !exists {
 		return env, dbStateOperatorMissing, nil
