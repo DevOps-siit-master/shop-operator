@@ -53,13 +53,17 @@ type microservice struct {
 	port          int32
 	ingressPath   string
 	hasMigrations bool
+	// hasMetrics marks services that expose a Prometheus /metrics endpoint,
+	// so reconcileServiceMonitor knows which Services to scrape. The frontend
+	// is a static SPA with nothing to scrape, so it's left false.
+	hasMetrics bool
 }
 
 var (
-	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "/auth-api", hasMigrations: true}
-	msOrder     = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api"}
-	msPayment   = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api"}
-	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api"}
+	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "/auth-api", hasMigrations: true, hasMetrics: true}
+	msOrder     = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api", hasMetrics: true}
+	msPayment   = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api", hasMetrics: true}
+	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api", hasMetrics: true}
 	msFrontend  = microservice{name: frontendServiceName, envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"}
 
 	shopMicroservices = []microservice{msAuth, msOrder, msPayment, msInventory, msFrontend}
@@ -104,6 +108,11 @@ const (
 	orderServiceName     = "order"
 	frontendServiceName  = "frontend"
 	inventoryServiceName = "inventory"
+
+	// httpPortName is the name shared by every microservice's container port,
+	// Service port, and (for hasMetrics services) ServiceMonitor endpoint —
+	// Services/ServiceMonitors target ports by name, not number.
+	httpPortName = "http"
 )
 
 // databaseState describes how far along the Shop's backing database is. It lets
@@ -138,10 +147,12 @@ type ShopReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=redis.redis.opstreelabs.in,resources=redis,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives a Shop CR towards its desired state: a database (via the
 // CNPG or OSS Redis operator), a Deployment of the Shop app scaled to the
@@ -170,6 +181,12 @@ func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileDiscordChannel(ctx, &shop); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileServiceMonitor(ctx, &shop); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileGrafanaDashboard(ctx, &shop); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -312,12 +329,19 @@ func discordResourceName(shop *shophubv1.Shop) string {
 	return resourceName(shop) + "-discord"
 }
 
+// labelInstance identifies which Shop a resource belongs to. Needed as an
+// explicit selector key (not just part of labelsFor's output) wherever a
+// query must disambiguate Shops sharing a namespace — ShopHub deploys every
+// Shop into one shared namespace, so namespace alone never uniquely
+// identifies one.
+const labelInstance = "app.kubernetes.io/instance"
+
 // labelsFor returns the recommended Kubernetes labels shared by all objects a
 // Shop owns, so they can be selected together.
 func labelsFor(shop *shophubv1.Shop) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "shop",
-		"app.kubernetes.io/instance":   shop.Name,
+		labelInstance:                  shop.Name,
 		"app.kubernetes.io/managed-by": "shop-operator",
 	}
 }
@@ -648,8 +672,8 @@ func (r *ShopReconciler) createOrIgnoreMissingCRD(
 		// tuned out-of-band) and just report it present.
 		return true, nil
 	case apimeta.IsNoMatchError(err):
-		// The backing operator's CRD isn't installed. Degrade gracefully.
-		log.Info("Database CRD not installed; skipping DB creation",
+		// The backing operator/CRD isn't installed. Degrade gracefully.
+		log.Info("CRD not installed; skipping creation",
 			"gvk", obj.GetObjectKind().GroupVersionKind().String())
 		return false, nil
 	case !apierrors.IsNotFound(err):
@@ -665,13 +689,13 @@ func (r *ShopReconciler) createOrIgnoreMissingCRD(
 	}
 	if err := r.Create(ctx, obj); err != nil {
 		if apimeta.IsNoMatchError(err) {
-			log.Info("Database CRD not installed; skipping DB creation",
+			log.Info("CRD not installed; skipping creation",
 				"gvk", obj.GetObjectKind().GroupVersionKind().String())
 			return false, nil
 		}
 		return false, err
 	}
-	log.Info("Created database resource", "name", key.Name,
+	log.Info("Created resource", "name", key.Name,
 		"kind", obj.GetObjectKind().GroupVersionKind().Kind)
 	return true, nil
 }
@@ -708,7 +732,7 @@ func (r *ShopReconciler) reconcileDeployment(
 		c.Image = microserviceImage(m)
 		c.ImagePullPolicy = imagePullPolicy()
 		c.Ports = []corev1.ContainerPort{{
-			Name:          "http",
+			Name:          httpPortName,
 			ContainerPort: m.port,
 			Protocol:      corev1.ProtocolTCP,
 		}}
@@ -802,9 +826,9 @@ func (r *ShopReconciler) reconcileService(ctx context.Context, shop *shophubv1.S
 		service.Spec.Selector = labels
 		service.Spec.Type = corev1.ServiceTypeClusterIP
 		service.Spec.Ports = []corev1.ServicePort{{
-			Name:       "http",
+			Name:       httpPortName,
 			Port:       m.port,
-			TargetPort: intstr.FromString("http"),
+			TargetPort: intstr.FromString(httpPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}}
 		return controllerutil.SetControllerReference(shop, service, r.Scheme)
@@ -908,6 +932,108 @@ func (r *ShopReconciler) reconcileDiscordChannel(ctx context.Context, shop *shop
 		channel.Spec.ChannelName = shop.Spec.DiscordChannel.ChannelName
 		channel.Spec.ServerID = shop.Spec.DiscordChannel.ServerID
 		return controllerutil.SetControllerReference(shop, channel, r.Scheme)
+	})
+	return err
+}
+
+// reconcileServiceMonitor ensures Prometheus (kube-prometheus-stack) scrapes
+// /metrics off every microservice this Shop owns that exposes one. Skipped
+// gracefully if the ServiceMonitor CRD (prometheus-operator) isn't installed,
+// same as the CNPG/Redis database resources.
+func (r *ShopReconciler) reconcileServiceMonitor(ctx context.Context, shop *shophubv1.Shop) error {
+	log := logf.FromContext(ctx)
+
+	var components []any
+	for _, m := range shopMicroservices {
+		if m.hasMetrics {
+			components = append(components, m.name)
+		}
+	}
+	if len(components) == 0 {
+		return nil
+	}
+
+	sm := &unstructured.Unstructured{}
+	sm.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "monitoring.coreos.com",
+		Version: "v1",
+		Kind:    "ServiceMonitor",
+	})
+	sm.SetName(resourceName(shop) + "-metrics")
+	sm.SetNamespace(shop.Namespace)
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sm, func() error {
+		labels := labelsFor(shop)
+		// Required: kube-prometheus-stack's Prometheus only watches
+		// ServiceMonitors carrying this label (its serviceMonitorSelector).
+		labels["release"] = "kube-prometheus-stack"
+		sm.SetLabels(labels)
+
+		if err := unstructured.SetNestedField(sm.Object, map[string]any{
+			// No namespaceSelector: defaults to the ServiceMonitor's own
+			// namespace, which is where this Shop's Services live — but
+			// ShopHub deploys every Shop into one shared namespace
+			// (shophub-api's SHOP_NAMESPACE), so matchLabels on instance is
+			// required too, or this would also re-select every other Shop's
+			// Services sharing that namespace.
+			"selector": map[string]any{
+				"matchLabels": map[string]any{
+					labelInstance: shop.Name,
+				},
+				"matchExpressions": []any{
+					map[string]any{
+						"key":      "app.kubernetes.io/component",
+						"operator": "In",
+						"values":   components,
+					},
+				},
+			},
+			"endpoints": []any{
+				map[string]any{
+					"port":     httpPortName,
+					"path":     "/metrics",
+					"interval": "30s",
+				},
+			},
+		}, "spec"); err != nil {
+			return err
+		}
+		return controllerutil.SetControllerReference(shop, sm, r.Scheme)
+	})
+	if err != nil {
+		if apimeta.IsNoMatchError(err) {
+			log.Info("ServiceMonitor CRD not installed; skipping metrics scrape config")
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// reconcileGrafanaDashboard creates or converges the ConfigMap Grafana's
+// dashboard sidecar (kube-prometheus-stack, configured with NAMESPACE=ALL)
+// auto-discovers via the grafana_dashboard label — one dashboard per Shop
+// instance (spec 4.1). No CRD involved (ConfigMap is core/v1), so unlike
+// reconcileServiceMonitor there's nothing to degrade gracefully around.
+func (r *ShopReconciler) reconcileGrafanaDashboard(ctx context.Context, shop *shophubv1.Shop) error {
+	body, err := buildShopDashboardJSON(shop)
+	if err != nil {
+		return err
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName(shop) + "-dashboard",
+			Namespace: shop.Namespace,
+		},
+	}
+
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		labels := labelsFor(shop)
+		labels["grafana_dashboard"] = "1"
+		cm.Labels = labels
+		cm.Data = map[string]string{resourceName(shop) + "-dashboard.json": string(body)}
+		return controllerutil.SetControllerReference(shop, cm, r.Scheme)
 	})
 	return err
 }
