@@ -60,11 +60,11 @@ func TestBuildShopDashboardJSON(t *testing.T) {
 	var hasMetrics, hasLogs, hasTraces bool
 	for _, p := range dash.Panels {
 		switch {
-		case p.Datasource.Type == "prometheus":
+		case p.Datasource.Type == dsPrometheus:
 			hasMetrics = true
-		case p.Type == "logs" && p.Datasource.UID == "loki":
+		case p.Type == "logs" && p.Datasource.UID == dsLoki:
 			hasLogs = true
-		case p.Type == "table" && p.Datasource.UID == "tempo":
+		case p.Type == typeTable && p.Datasource.UID == dsTempo:
 			hasTraces = true
 		}
 	}
