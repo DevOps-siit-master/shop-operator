@@ -59,16 +59,16 @@ type microservice struct {
 	hasMetrics bool
 	// hasTracing marks services instrumented with OpenTelemetry (their
 	// src/tracing.ts), so shopAppEnv points their OTLP exporter at the
-	// in-cluster Tempo. Auth and inventory are not instrumented yet, and the
-	// frontend is a static SPA, so those stay false.
+	// in-cluster Tempo. Every backend microservice is instrumented; only the
+	// frontend is a static SPA with nothing to trace, so it stays false.
 	hasTracing bool
 }
 
 var (
-	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "/auth-api", hasMigrations: true, hasMetrics: true}
+	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "/auth-api", hasMigrations: true, hasMetrics: true, hasTracing: true}
 	msOrder     = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api", hasMetrics: true, hasTracing: true}
 	msPayment   = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api", hasMetrics: true, hasTracing: true}
-	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api", hasMetrics: true}
+	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api", hasMetrics: true, hasTracing: true}
 	msFrontend  = microservice{name: frontendServiceName, envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"}
 
 	shopMicroservices = []microservice{msAuth, msOrder, msPayment, msInventory, msFrontend}
@@ -812,8 +812,8 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 	// Tracing: point instrumented services at the in-cluster Tempo and stamp
 	// each with a per-Shop, per-service identity so traces are attributable in
 	// Grafana — service.name = shop-<name>-<svc>, plus a shop.instance resource
-	// attribute for per-Shop dashboard filtering. Un-instrumented services
-	// (auth/inventory for now, and the static frontend) are left untouched.
+	// attribute for per-Shop dashboard filtering. The static frontend has no
+	// tracing and is left untouched.
 	if m.hasTracing {
 		env = append(env,
 			corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: otelEndpoint()},
