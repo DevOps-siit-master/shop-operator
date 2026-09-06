@@ -18,13 +18,17 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	shophubv1 "github.com/DevOps-siit-master/shop-operator/api/v1"
+	"github.com/DevOps-siit-master/shop-operator/internal/wallet"
 )
 
 // WalletReconciler reconciles a Wallet object
@@ -37,21 +41,58 @@ type WalletReconciler struct {
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=wallets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=shophub.devops-siit.io,resources=wallets/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Wallet object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
+// Reconcile validates the payout address a Shop declared and publishes it on
+// the Wallet's status, which is the one place the rest of the platform reads it
+// from. The address is supplied by the shop owner (spec 1.2); the operator
+// deliberately does not generate a key pair, because the private key of an
+// account that receives the owner's money should not live in the cluster.
 func (r *WalletReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
-	// TODO(user): your logic here
+	var w shophubv1.Wallet
+	if err := r.Get(ctx, req.NamespacedName, &w); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	return ctrl.Result{}, nil
+	switch {
+	case w.Spec.Address == "":
+		return ctrl.Result{}, r.setStatus(ctx, &w, "", false, "AddressMissing",
+			"The shop has no payout address configured")
+
+	case !wallet.IsValidAddress(w.Spec.Address):
+		log.Info("Rejecting malformed payout address", "wallet", w.Name)
+		return ctrl.Result{}, r.setStatus(ctx, &w, "", false, "InvalidAddress",
+			fmt.Sprintf("%q is not a valid EVM address", w.Spec.Address))
+
+	default:
+		return ctrl.Result{}, r.setStatus(ctx, &w, w.Spec.Address, true, "AddressAccepted",
+			"Payout address accepted")
+	}
+}
+
+// setStatus writes the observed address and readiness back onto the Wallet, so
+// `kubectl get wallet` and the ShopHub panel can show whether payments to this
+// shop can be verified at all.
+func (r *WalletReconciler) setStatus(
+	ctx context.Context, w *shophubv1.Wallet,
+	address string, ready bool, reason, message string,
+) error {
+	w.Status.Address = address
+	w.Status.Ready = ready
+
+	status := metav1.ConditionFalse
+	if ready {
+		status = metav1.ConditionTrue
+	}
+	apimeta.SetStatusCondition(&w.Status.Conditions, metav1.Condition{
+		Type:               conditionReadyType,
+		Status:             status,
+		ObservedGeneration: w.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+
+	return r.Status().Update(ctx, w)
 }
 
 // SetupWithManager sets up the controller with the Manager.
