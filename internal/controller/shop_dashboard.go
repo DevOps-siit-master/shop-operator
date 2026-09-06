@@ -36,6 +36,16 @@ const (
 // provisioned, rather than baking in a specific datasource UID.
 var grafanaDatasourceRef = map[string]any{keyType: "prometheus", "uid": "${datasource}"}
 
+// lokiDatasourceRef / tempoDatasourceRef point at the logs and traces
+// datasources provisioned on the shared Grafana with fixed uids (see
+// kube-state .../kube-prometheus-stack/values.yaml). Unlike the Prometheus
+// panels (which resolve via the datasource template variable), the logs and
+// traces panels bind these directly by uid.
+var (
+	lokiDatasourceRef  = map[string]any{keyType: "loki", "uid": "loki"}
+	tempoDatasourceRef = map[string]any{keyType: "tempo", "uid": "tempo"}
+)
+
 func dashboardTarget(expr, refID, legend string) map[string]any {
 	t := map[string]any{keyDatasource: grafanaDatasourceRef, "expr": expr, "refId": refID}
 	if legend != "" {
@@ -90,6 +100,37 @@ func dashboardTimeseries(id int, title string, series []dashboardSeries, x, y, w
 		keyDatasource: grafanaDatasourceRef,
 		"fieldConfig": map[string]any{"defaults": map[string]any{"unit": unit}, "overrides": []any{}},
 		keyTargets:    targets,
+	}
+}
+
+// dashboardLogs builds a full-width Loki logs panel bound to the loki datasource.
+func dashboardLogs(id int, title, expr string, y int) map[string]any {
+	return map[string]any{
+		"id": id, keyType: "logs", keyTitle: title,
+		keyGridPos:    map[string]any{"x": 0, "y": y, "w": 24, "h": 10},
+		keyDatasource: lokiDatasourceRef,
+		"options": map[string]any{
+			"showTime": true, "wrapLogMessage": true, "enableLogDetails": true,
+			"dedupStrategy": "none", "sortOrder": "Descending",
+		},
+		keyTargets: []any{map[string]any{
+			keyDatasource: lokiDatasourceRef, "expr": expr,
+			"refId": "A", "queryType": "range",
+		}},
+	}
+}
+
+// dashboardTraces builds a full-width table of this Shop's recent traces, bound
+// to the tempo datasource and driven by a TraceQL query.
+func dashboardTraces(id int, title, query string, y int) map[string]any {
+	return map[string]any{
+		"id": id, keyType: "table", keyTitle: title,
+		keyGridPos:    map[string]any{"x": 0, "y": y, "w": 24, "h": 8},
+		keyDatasource: tempoDatasourceRef,
+		keyTargets: []any{map[string]any{
+			keyDatasource: tempoDatasourceRef, "queryType": "traceql",
+			"query": query, "refId": "A", "limit": 20, "tableType": "traces",
+		}},
 	}
 }
 
@@ -148,6 +189,16 @@ func buildShopDashboardJSON(shop *shophubv1.Shop) ([]byte, error) {
 			{fmt.Sprintf(`sum by (pod) (rate(container_network_transmit_bytes_total{%s}[5m]))`, scope), "{{pod}} tx"},
 		}, 0, 28, 24, "Bps"),
 	}
+
+	// Logs (Loki) and traces (Tempo) for this Shop, on the same dashboard as its
+	// metrics (spec 4.1) so all three observability signals live in one place.
+	// Scoped to this Shop's pods (logs) and per-Shop service names (traces).
+	panels = append(panels,
+		dashboardTraces(13, "Recent traces (all services)",
+			fmt.Sprintf(`{resource.service.name=~"%s-.*"}`, resourceName(shop)), 36),
+		dashboardLogs(14, "Logs (all services)",
+			fmt.Sprintf(`{namespace="%s", pod=~"%s-.*"}`, shop.Namespace, resourceName(shop)), 44),
+	)
 
 	dashboard := map[string]any{
 		"uid":           "shop-" + shop.Name,
