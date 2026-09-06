@@ -834,7 +834,7 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 		env = append(env,
 			corev1.EnvVar{Name: "WALLET_REF", Value: walletResourceName(shop)},
 			corev1.EnvVar{Name: "SHOP_WALLET_ADDRESS", Value: shop.Spec.Wallet.Address},
-			corev1.EnvVar{Name: "ORDER_API_URL", Value: serviceURL(shop, orderServiceName, msOrder.port)},
+			corev1.EnvVar{Name: "ORDER_SERVICE_URL", Value: serviceURL(shop, orderServiceName, msOrder.port)},
 			corev1.EnvVar{Name: "USDT_ADDRESS", Value: usdtAddress()},
 			corev1.EnvVar{Name: "SEPOLIA_RPC_URL", Value: sepoliaRPCURL()},
 		)
