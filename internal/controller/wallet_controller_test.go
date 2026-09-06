@@ -83,5 +83,45 @@ var _ = Describe("Wallet Controller", func() {
 			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
 			// Example: If you expect a certain status condition after reconciliation, verify it here.
 		})
+		It("accepts a valid payout address and publishes it on the status", func() {
+			name := types.NamespacedName{Name: "wallet-valid", Namespace: resourceNamespace}
+			const address = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+
+			Expect(k8sClient.Create(ctx, &shophubv1.Wallet{
+				ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
+				Spec:       shophubv1.WalletSpec{ShopRef: "shop-a", Address: address},
+			})).To(Succeed())
+
+			reconciler := &WalletReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated shophubv1.Wallet
+			Expect(k8sClient.Get(ctx, name, &updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeTrue())
+			Expect(updated.Status.Address).To(Equal(address))
+
+			Expect(k8sClient.Delete(ctx, &updated)).To(Succeed())
+		})
+
+		It("rejects a malformed payout address", func() {
+			name := types.NamespacedName{Name: "wallet-invalid", Namespace: resourceNamespace}
+
+			Expect(k8sClient.Create(ctx, &shophubv1.Wallet{
+				ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
+				Spec:       shophubv1.WalletSpec{ShopRef: "shop-b", Address: "0xnot-an-address"},
+			})).To(Succeed())
+
+			reconciler := &WalletReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var updated shophubv1.Wallet
+			Expect(k8sClient.Get(ctx, name, &updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeFalse())
+			Expect(updated.Status.Address).To(BeEmpty())
+
+			Expect(k8sClient.Delete(ctx, &updated)).To(Succeed())
+		})
 	})
 })
