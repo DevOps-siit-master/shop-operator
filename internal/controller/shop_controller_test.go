@@ -123,11 +123,35 @@ var _ = Describe("Shop Controller", func() {
 			}
 
 			By("checking the payment container carries the wallet references")
+			const validPayoutAddress = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+
 			payment := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, childName("payment"), payment)).To(Succeed())
 			paymentEnv := payment.Spec.Template.Spec.Containers[0].Env
 			Expect(envValue(paymentEnv, "WALLET_REF")).To(Equal("shop-" + resourceName + "-wallet"))
-			Expect(envValue(paymentEnv, "SHOP_WALLET_ADDRESS")).To(Equal("0xtest"))
+
+			By("leaving the payout address empty until the Wallet controller validates it")
+			Expect(envValue(paymentEnv, "SHOP_WALLET_ADDRESS")).To(BeEmpty())
+
+			By("publishing the address once the Wallet reports it")
+			walletKey := types.NamespacedName{
+				Name:      "shop-" + resourceName + "-wallet",
+				Namespace: payment.Namespace,
+			}
+			paymentWallet := &shophubv1.Wallet{}
+			Expect(k8sClient.Get(ctx, walletKey, paymentWallet)).To(Succeed())
+			paymentWallet.Status.Address = validPayoutAddress
+			paymentWallet.Status.Ready = true
+			Expect(k8sClient.Status().Update(ctx, paymentWallet)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, childName("payment"), payment)).To(Succeed())
+			paymentEnv = payment.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(paymentEnv, "SHOP_WALLET_ADDRESS")).To(Equal(validPayoutAddress))
 
 			By("checking a traced service carries the OpenTelemetry wiring to Tempo")
 			order := &appsv1.Deployment{}
