@@ -57,13 +57,18 @@ type microservice struct {
 	// so reconcileServiceMonitor knows which Services to scrape. The frontend
 	// is a static SPA with nothing to scrape, so it's left false.
 	hasMetrics bool
+	// hasTracing marks services instrumented with OpenTelemetry (their
+	// src/tracing.ts), so shopAppEnv points their OTLP exporter at the
+	// in-cluster Tempo. Every backend microservice is instrumented; only the
+	// frontend is a static SPA with nothing to trace, so it stays false.
+	hasTracing bool
 }
 
 var (
-	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "/auth-api", hasMigrations: true, hasMetrics: true}
-	msOrder     = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api", hasMetrics: true}
-	msPayment   = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api", hasMetrics: true}
-	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api", hasMetrics: true}
+	msAuth      = microservice{name: authServiceName, envVar: "SHOP_AUTH_IMAGE", image: "ghcr.io/devops-siit-master/shophub-auth-service:dev", port: 3000, ingressPath: "/auth-api", hasMigrations: true, hasMetrics: true, hasTracing: true}
+	msOrder     = microservice{name: orderServiceName, envVar: "SHOP_ORDER_IMAGE", image: "ghcr.io/devops-siit-master/shophub-order-service:dev", port: 3000, ingressPath: "/order-api", hasMetrics: true, hasTracing: true}
+	msPayment   = microservice{name: paymentServiceName, envVar: "SHOP_PAYMENT_IMAGE", image: "ghcr.io/devops-siit-master/shophub-payment-service:dev", port: 3000, ingressPath: "/payment-api", hasMetrics: true, hasTracing: true}
+	msInventory = microservice{name: inventoryServiceName, envVar: "SHOP_INVENTORY_IMAGE", image: "ghcr.io/devops-siit-master/shophub-inventory-service:dev", port: 3000, ingressPath: "/inventory-api", hasMetrics: true, hasTracing: true}
 	msFrontend  = microservice{name: frontendServiceName, envVar: "SHOP_FRONTEND_IMAGE", image: "ghcr.io/devops-siit-master/shophub-frontend:dev", port: 8080, ingressPath: "/"}
 
 	shopMicroservices = []microservice{msAuth, msOrder, msPayment, msInventory, msFrontend}
@@ -92,6 +97,13 @@ const (
 	sepoliaRPCURLEnv     = "SEPOLIA_RPC_URL"
 	usdtAddressDefault   = ""
 	sepoliaRPCURLDefault = "https://sepolia.drpc.org"
+
+	// otelEndpointEnv overrides the OTLP traces endpoint the operator wires into
+	// traced Shop microservices; it defaults to the in-cluster Tempo. The value
+	// is the full traces URL (with /v1/traces) because the services' src/tracing.ts
+	// passes it verbatim to the OTLPTraceExporter and does not append the signal path.
+	otelEndpointEnv     = "TEMPO_OTLP_ENDPOINT"
+	defaultOtelEndpoint = "http://tempo.observability.svc.cluster.local:4318/v1/traces"
 
 	// defaultRedisImage is the Redis image used for the light (Redis) tier via the
 	// OT-Container-Kit operator, overridable with REDIS_IMAGE.
@@ -776,6 +788,15 @@ func usdtAddress() string {
 	return usdtAddressDefault
 }
 
+// otelEndpoint returns the OTLP traces endpoint that traced Shop microservices
+// export to, overridable via TEMPO_OTLP_ENDPOINT.
+func otelEndpoint() string {
+	if e := os.Getenv(otelEndpointEnv); e != "" {
+		return e
+	}
+	return defaultOtelEndpoint
+}
+
 // shopAppEnv assembles the container env: identity/config from the Shop spec
 // plus the database connection vars.
 func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, authSecretName string) []corev1.EnvVar {
@@ -786,6 +807,19 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 		{Name: "DATABASE_TYPE", Value: string(shop.Spec.DatabaseType)},
 		{Name: "DISCORD_CHANNEL_REF", Value: discordResourceName(shop)},
 		{Name: "PORT", Value: fmt.Sprintf("%d", m.port)},
+	}
+
+	// Tracing: point instrumented services at the in-cluster Tempo and stamp
+	// each with a per-Shop, per-service identity so traces are attributable in
+	// Grafana — service.name = shop-<name>-<svc>, plus a shop.instance resource
+	// attribute for per-Shop dashboard filtering. The static frontend has no
+	// tracing and is left untouched.
+	if m.hasTracing {
+		env = append(env,
+			corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: otelEndpoint()},
+			corev1.EnvVar{Name: "OTEL_SERVICE_NAME", Value: serviceResourceName(shop, m)},
+			corev1.EnvVar{Name: "OTEL_RESOURCE_ATTRIBUTES", Value: "shop.instance=" + shop.Name},
+		)
 	}
 
 	switch m.name {
