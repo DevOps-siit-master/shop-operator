@@ -129,6 +129,21 @@ var _ = Describe("Shop Controller", func() {
 			Expect(envValue(paymentEnv, "WALLET_REF")).To(Equal("shop-" + resourceName + "-wallet"))
 			Expect(envValue(paymentEnv, "SHOP_WALLET_ADDRESS")).To(Equal("0xtest"))
 
+			By("checking a traced service carries the OpenTelemetry wiring to Tempo")
+			order := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, childName("order"), order)).To(Succeed())
+			orderEnv := order.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(orderEnv, "OTEL_EXPORTER_OTLP_ENDPOINT")).
+				To(Equal("http://tempo.observability.svc.cluster.local:4318/v1/traces"))
+			Expect(envValue(orderEnv, "OTEL_SERVICE_NAME")).To(Equal("shop-" + resourceName + "-order"))
+			Expect(envValue(orderEnv, "OTEL_RESOURCE_ATTRIBUTES")).To(Equal("shop.instance=" + resourceName))
+
+			By("checking an un-instrumented service has no tracing wiring")
+			authDeploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, childName("auth"), authDeploy)).To(Succeed())
+			Expect(envValue(authDeploy.Spec.Template.Spec.Containers[0].Env, "OTEL_EXPORTER_OTLP_ENDPOINT")).
+				To(BeEmpty())
+
 			By("checking every container carries the discord channel reference")
 			for _, service := range shopServices {
 				deployment := &appsv1.Deployment{}
