@@ -40,7 +40,7 @@ const labelShop = "shop"
 func shopAlertRule(name, expr, forDuration, severity, shopName, summary, description string) map[string]any {
 	return map[string]any{
 		"alert": name,
-		"expr":  expr,
+		keyExpr: expr,
 		"for":   forDuration,
 		"labels": map[string]any{
 			"severity": severity,
