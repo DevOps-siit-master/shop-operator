@@ -93,9 +93,13 @@ func dashboardTimeseries(id int, title string, series []dashboardSeries, x, y, w
 	}
 }
 
-func buildShopDashboardJSON(shop *shophubv1.Shop) ([]byte, error) {
-	scope := fmt.Sprintf(`namespace="%s", pod=~"^%s-(auth|order|payment|inventory)-.*"`,
+func shopMetricsScope(shop *shophubv1.Shop) string {
+	return fmt.Sprintf(`namespace="%s", pod=~"^%s-(auth|order|payment|inventory)-.*"`,
 		shop.Namespace, resourceName(shop))
+}
+
+func buildShopDashboardJSON(shop *shophubv1.Shop) ([]byte, error) {
+	scope := shopMetricsScope(shop)
 
 	displayName := shop.Spec.DisplayName
 	if displayName == "" {
@@ -152,11 +156,11 @@ func buildShopDashboardJSON(shop *shophubv1.Shop) ([]byte, error) {
 		"timezone":      "browser",
 		"schemaVersion": 39,
 		"version":       1,
-		keyRefresh:      "30s",
+		keyRefresh:      defaultInterval30s,
 		"time":          map[string]any{"from": "now-24h", "to": "now"},
 		"templating": map[string]any{"list": []any{
 			map[string]any{
-				"name": "datasource", "label": "Data source", keyType: "datasource",
+				keyName: "datasource", "label": "Data source", keyType: "datasource",
 				"query": "prometheus", "current": map[string]any{}, "hide": 0,
 				"includeAll": false, "multi": false, keyRefresh: 1,
 				"options": []any{}, "regex": "",
