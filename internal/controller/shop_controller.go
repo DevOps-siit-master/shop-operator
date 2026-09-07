@@ -761,7 +761,7 @@ func (r *ShopReconciler) reconcileDeployment(
 			ContainerPort: m.port,
 			Protocol:      corev1.ProtocolTCP,
 		}}
-		c.Env = shopAppEnv(shop, m, dbEnv, authSecretName)
+		c.Env = r.shopAppEnv(ctx, shop, m, dbEnv, authSecretName)
 
 		return controllerutil.SetControllerReference(shop, deployment, r.Scheme)
 	})
@@ -799,7 +799,7 @@ func otelEndpoint() string {
 
 // shopAppEnv assembles the container env: identity/config from the Shop spec
 // plus the database connection vars.
-func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, authSecretName string) []corev1.EnvVar {
+func (r *ShopReconciler) shopAppEnv(ctx context.Context, shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, authSecretName string) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "SHOP_NAME", Value: shop.Name},
 		{Name: "SERVICE_NAME", Value: m.name},
@@ -833,7 +833,7 @@ func shopAppEnv(shop *shophubv1.Shop, m microservice, dbEnv []corev1.EnvVar, aut
 	case paymentServiceName:
 		env = append(env,
 			corev1.EnvVar{Name: "WALLET_REF", Value: walletResourceName(shop)},
-			corev1.EnvVar{Name: "SHOP_WALLET_ADDRESS", Value: shop.Spec.Wallet.Address},
+			corev1.EnvVar{Name: "SHOP_WALLET_ADDRESS", Value: r.payoutAddress(ctx, shop)},
 			corev1.EnvVar{Name: "ORDER_SERVICE_URL", Value: serviceURL(shop, orderServiceName, msOrder.port)},
 			corev1.EnvVar{Name: "USDT_ADDRESS", Value: usdtAddress()},
 			corev1.EnvVar{Name: "SEPOLIA_RPC_URL", Value: sepoliaRPCURL()},
@@ -902,7 +902,7 @@ func (r *ShopReconciler) reconcileMigrationJob(
 	var job batchv1.Job
 	err = r.Get(ctx, types.NamespacedName{Namespace: shop.Namespace, Name: name}, &job)
 	if apierrors.IsNotFound(err) {
-		job = r.buildMigrationJob(shop, svc, name, image, dbEnv, authSecretName)
+		job = r.buildMigrationJob(ctx, shop, svc, name, image, dbEnv, authSecretName)
 		if err := controllerutil.SetControllerReference(shop, &job, r.Scheme); err != nil {
 			return false, err
 		}
@@ -915,7 +915,7 @@ func (r *ShopReconciler) reconcileMigrationJob(
 }
 
 func (r *ShopReconciler) buildMigrationJob(
-	shop *shophubv1.Shop, svc microservice, name, image string, dbEnv []corev1.EnvVar, authSecretName string,
+	ctx context.Context, shop *shophubv1.Shop, svc microservice, name, image string, dbEnv []corev1.EnvVar, authSecretName string,
 ) batchv1.Job {
 	backoff, ttl := int32(3), int32(600)
 	return batchv1.Job{
@@ -934,7 +934,7 @@ func (r *ShopReconciler) buildMigrationJob(
 						Image: image,
 						Command: []string{"node", "node_modules/typeorm/cli.js",
 							"migration:run", "-d", "dist/database/data-source.js"},
-						Env: shopAppEnv(shop, svc, dbEnv, authSecretName), // same env the app gets
+						Env: r.shopAppEnv(ctx, shop, svc, dbEnv, authSecretName), // same env the app gets
 					}},
 				},
 			},
@@ -961,6 +961,25 @@ func (r *ShopReconciler) reconcileWallet(ctx context.Context, shop *shophubv1.Sh
 		return controllerutil.SetControllerReference(shop, wallet, r.Scheme)
 	})
 	return err
+}
+
+// payoutAddress returns the address the WalletReconciler validated and published
+// on this Shop's Wallet. It is empty until the Wallet reports one: the payment
+// service then starts without an address rather than with an unvalidated one, so
+// a typo surfaces as "this shop has no payment wallet configured" instead of
+// every payment being rejected on chain for reasons nobody can see.
+//
+// No requeue is needed - SetupWithManager owns the Wallet, so writing its status
+// triggers another Shop reconcile and the Deployment picks the address up then.
+func (r *ShopReconciler) payoutAddress(ctx context.Context, shop *shophubv1.Shop) string {
+	var wallet shophubv1.Wallet
+	key := client.ObjectKey{Namespace: shop.Namespace, Name: walletResourceName(shop)}
+	if err := r.Get(ctx, key, &wallet); err != nil {
+		// The Wallet is created earlier in this same reconcile; a miss here only
+		// means its controller has not written the status yet.
+		return ""
+	}
+	return wallet.Status.Address
 }
 
 // reconcileDiscordChannel creates or converges the DiscordChannel the Shop owns,
